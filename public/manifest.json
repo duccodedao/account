@@ -1,0 +1,17 @@
+{
+  "name": "SecurePass Manager",
+  "short_name": "SecurePass",
+  "description": "Professional password management system with multi-layer authentication.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#3b82f6",
+  "icons": [
+    {
+      "src": "https://hdd.io.vn/img/bmassloadings.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

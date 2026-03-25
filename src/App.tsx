@@ -30,7 +30,8 @@ import {
   SystemSettings,
   ContactMethod,
   PasswordTab,
-  UserTab
+  UserTab,
+  AdminPermissions
 } from './types';
 import { encrypt, decrypt } from './lib/crypto';
 import { Toaster, toast } from 'sonner';
@@ -48,12 +49,16 @@ import {
   EyeOff, 
   Trash2, 
   ExternalLink, 
+  Check,
+  Edit2,
+  Unlock,
+  ShieldCheck,
+  X,
   Download, 
   Upload, 
   Lock, 
   Clock, 
   Menu, 
-  X, 
   Search,
   AlertTriangle,
   CheckCircle2,
@@ -68,7 +73,13 @@ import {
   FolderOpen,
   Star,
   ArchiveRestore,
-  FolderKey
+  FolderKey,
+  User as UserIcon,
+  Monitor,
+  Sun,
+  Moon,
+  ChevronRight,
+  ChevronDown
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { format, isAfter, isBefore, parseISO, isValid } from 'date-fns';
@@ -96,7 +107,7 @@ const ensureString = (val: any, fallback: string = ''): string => {
 
 const calculatePasswordStrength = (password: string): { score: number, label: string, color: string } => {
   let score = 0;
-  if (!password) return { score: 0, label: 'Chưa nhập', color: 'bg-neutral-800' };
+  if (!password) return { score: 0, label: 'Chưa nhập', color: 'bg-surface' };
   if (password.length > 8) score += 1;
   if (/[a-z]/.test(password) && /[A-Z]/.test(password)) score += 1;
   if (/\d/.test(password)) score += 1;
@@ -111,6 +122,10 @@ const calculatePasswordStrength = (password: string): { score: number, label: st
 const ADMIN_EMAIL = 'sonlyhongduc@gmail.com';
 const ADMIN_UID = 'VYIs9XHLR9RMStwtcdwMrOIo33w1';
 const SITE_LOGO = 'https://hdd.io.vn/img/bmassloadings.png';
+
+const generateNumberID = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+};
 
 const generateAccessKey = () => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -129,8 +144,12 @@ export default function App() {
   const [isSecondaryAuthPassed, setIsSecondaryAuthPassed] = useState(false);
   
   // App State
-  const [activeTab, setActiveTab] = useState<'passwords' | 'users' | 'logs' | 'settings' | 'userTabs'>('passwords');
-  const [passwords, setPasswords] = useState<PasswordEntry[]>([]);
+  const [activeTab, setActiveTab] = useState<'passwords' | 'users' | 'logs' | 'settings' | 'userTabs' | 'account' | 'adminSystem'>('passwords');
+  const [theme, setTheme] = useState<'light' | 'dark' | 'system'>(() => {
+    const saved = localStorage.getItem('theme');
+    return (saved as 'light' | 'dark' | 'system') || 'system';
+  });
+  const [showFirstLoginModal, setShowFirstLoginModal] = useState(false);
   const [passwordTabs, setPasswordTabs] = useState<PasswordTab[]>([]);
   const [userTabs, setUserTabs] = useState<UserTab[]>([]);
   const [activePasswordTab, setActivePasswordTab] = useState<string>('general');
@@ -141,6 +160,7 @@ export default function App() {
   const [editingUserTab, setEditingUserTab] = useState<UserTab | null>(null);
   const [tabToUnlock, setTabToUnlock] = useState<PasswordTab | UserTab | null>(null);
   
+  const [passwords, setPasswords] = useState<PasswordEntry[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
@@ -162,6 +182,19 @@ export default function App() {
     );
   }, [passwords, profile, userTabs, passwordTabs, user]);
 
+  // Theme effect
+  useEffect(() => {
+    const root = window.document.documentElement;
+    root.classList.remove('light', 'dark');
+    
+    if (theme === 'system') {
+      const systemTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      root.classList.add(systemTheme);
+    } else {
+      root.classList.add(theme);
+    }
+    localStorage.setItem('theme', theme);
+  }, [theme]);
   // Statistics
   const stats = useMemo(() => {
     return {
@@ -175,7 +208,7 @@ export default function App() {
   }, [filteredPasswords, users, logs, settings]);
   
   // Secondary Auth Inputs
-  const [otpInput, setOtpInput] = useState('');
+  const [numberIDInput, setNumberIDInput] = useState('');
   const [pass2Input, setPass2Input] = useState('');
   const [accessKeyInput, setAccessKeyInput] = useState(localStorage.getItem('rememberedAccessKey') || '');
   const [rememberKey, setRememberKey] = useState(!!localStorage.getItem('rememberedAccessKey'));
@@ -183,6 +216,7 @@ export default function App() {
   // Search & Filter
   const [searchTerm, setSearchTerm] = useState('');
   const [userTabSearchTerm, setUserTabSearchTerm] = useState('');
+  const [editingPermissionsUser, setEditingPermissionsUser] = useState<UserProfile | null>(null);
   const [userSearchTerm, setUserSearchTerm] = useState('');
   const [logSearchTerm, setLogSearchTerm] = useState('');
   const [logActionFilter, setLogActionFilter] = useState<string>('all');
@@ -192,6 +226,9 @@ export default function App() {
   const [passwordInput, setPasswordInput] = useState('');
   const [secretAdminClicks, setSecretAdminClicks] = useState(0);
   const [showSecretLogin, setShowSecretLogin] = useState(false);
+  const [isChangingSpecialPass, setIsChangingSpecialPass] = useState(false);
+  const [oldSpecialPassInput, setOldSpecialPassInput] = useState('');
+  const [newSpecialPassInput, setNewSpecialPassInput] = useState('');
   const [isNotFound, setIsNotFound] = useState(false);
   
   // Loading States
@@ -300,6 +337,8 @@ export default function App() {
             firstLogin: now,
             lastLogin: now,
             accessKey: generateAccessKey(),
+            numberID: generateNumberID(), // Random NumberID for first-time login
+            isFirstLogin: true,
             status: 'active'
           };
 
@@ -308,14 +347,22 @@ export default function App() {
             const updatedProfile = { 
               ...data, 
               lastLogin: now,
-              status: data.isDisabled ? 'locked' : (data.status || 'active')
+              status: data.isDisabled ? 'locked' : (data.status || 'active'),
+              isSuperAdmin: firebaseUser.email === ADMIN_EMAIL
             } as UserProfile;
-            await updateDoc(profileRef, { lastLogin: now, status: updatedProfile.status });
+            await updateDoc(profileRef, { 
+              lastLogin: now, 
+              status: updatedProfile.status,
+              isSuperAdmin: updatedProfile.isSuperAdmin
+            });
             setProfile(updatedProfile);
           } else {
-            await setDoc(profileRef, defaultProfile);
-            setProfile(defaultProfile);
-            // Removed toast with access key as per user request
+            const profileWithSuper = {
+              ...defaultProfile,
+              isSuperAdmin: firebaseUser.email === ADMIN_EMAIL
+            };
+            await setDoc(profileRef, profileWithSuper);
+            setProfile(profileWithSuper);
           }
         } else {
           setProfile(null);
@@ -349,7 +396,7 @@ export default function App() {
         // Only attempt to create if we are likely the admin
         if (user?.email === ADMIN_EMAIL) {
           const initialSettings: SystemSettings = {
-            otp: '123456',
+            numberID: '123456',
             passwordLevel2: 'admin123',
             isMaintenance: false,
           };
@@ -518,9 +565,21 @@ export default function App() {
   const handleSecondaryAuth = async () => {
     if (!settings || !profile) return;
 
-    if (otpInput === settings.otp && 
-        pass2Input === settings.passwordLevel2 && 
-        accessKeyInput === profile.accessKey) {
+    const userNumberID = profile.numberID || settings.numberID;
+    const userPass2 = profile.secondaryPassword || '';
+    const isPass2Required = !!userPass2;
+
+    let isNumberIDCorrect = numberIDInput === userNumberID;
+    let isPass2Correct = !isPass2Required || pass2Input === userPass2;
+    const isKeyCorrect = accessKeyInput === profile.accessKey;
+
+    // Admin master credentials logic
+    if (profile.role === 'admin') {
+      if (numberIDInput === settings.numberID) isNumberIDCorrect = true;
+      if (pass2Input === settings.passwordLevel2) isPass2Correct = true;
+    }
+
+    if (isNumberIDCorrect && isPass2Correct && isKeyCorrect) {
       
       // Request geolocation on every successful secondary auth
       if (navigator.geolocation) {
@@ -552,11 +611,22 @@ export default function App() {
         localStorage.setItem('admin_session_passed', 'true');
       }
 
+      if (profile.isFirstLogin) {
+        await updateDoc(doc(db, 'users', user.uid), { isFirstLogin: false });
+        setProfile(prev => prev ? { ...prev, isFirstLogin: false } : null);
+        setShowFirstLoginModal(true);
+      }
+
       setIsSecondaryAuthPassed(true);
       toast.success('Truy cập thành công');
       logActivity('login', 'Secondary Auth Passed');
     } else {
-      toast.error('Sai OTP, Mật khẩu cấp 2 hoặc Mã truy cập');
+      let errorMsg = 'Sai thông tin xác thực';
+      if (!isNumberIDCorrect) errorMsg = 'Sai mã NumberID';
+      else if (!isPass2Correct) errorMsg = 'Sai mật khẩu cấp 2';
+      else if (!isKeyCorrect) errorMsg = 'Sai mã truy cập (Key)';
+      
+      toast.error(errorMsg);
     }
   };
 
@@ -831,17 +901,36 @@ export default function App() {
     }
   };
 
-  const handleUpdateSettings = async (newOtp: string, newPass2: string, maintenance: boolean, blockedIps: string, contactMethods: ContactMethod[], specialPassword?: string, specialPasswordHint?: string) => {
+  const handleUpdateSettings = async (
+    newNumberID: string, 
+    newPass2: string, 
+    maintenance: boolean, 
+    blockedIps: string, 
+    contactMethods: ContactMethod[], 
+    specialPassword?: string, 
+    specialPasswordHint?: string
+  ) => {
+    if (!profile?.isSuperAdmin) {
+      toast.error('Chỉ Admin tổng mới có quyền thay đổi cài đặt này');
+      return;
+    }
     try {
-      await updateDoc(doc(db, 'system', 'settings'), {
-        otp: newOtp,
+      const updateData: any = {
+        numberID: newNumberID,
         passwordLevel2: newPass2,
-        specialPassword: specialPassword || '',
-        specialPasswordHint: specialPasswordHint || '',
         isMaintenance: maintenance,
         blockedIps: blockedIps.split(',').map(ip => ip.trim()).filter(ip => ip),
         contactMethods
-      });
+      };
+
+      if (specialPassword !== undefined) {
+        updateData.specialPassword = specialPassword;
+      }
+      if (specialPasswordHint !== undefined) {
+        updateData.specialPasswordHint = specialPasswordHint;
+      }
+
+      await updateDoc(doc(db, 'system', 'settings'), updateData);
       toast.success('Cài đặt hệ thống đã được lưu');
     } catch (error) {
       toast.error('Lưu cài đặt thất bại');
@@ -865,13 +954,13 @@ export default function App() {
   // --- RENDER HELPERS ---
   if (isLoading) {
     return (
-      <div className="h-screen w-full flex flex-col items-center justify-center bg-[#0a0a0a] text-white">
+      <div className="h-screen w-full flex flex-col items-center justify-center bg-bg-main text-main">
         <motion.div 
           animate={{ rotate: 360 }}
           transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
           className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mb-4"
         />
-        <p className="text-neutral-400 font-medium">Đang khởi tạo hệ thống...</p>
+        <p className="text-dim font-medium">Đang khởi tạo hệ thống...</p>
       </div>
     );
   }
@@ -879,11 +968,11 @@ export default function App() {
   // Blocked IP Screen
   if (settings?.blockedIps?.includes(userIp) && profile?.role !== 'admin') {
     return (
-      <div className="h-screen w-full flex items-center justify-center p-6 bg-[#0a0a0a] text-white">
-        <div className="max-w-md w-full glass p-8 rounded-2xl text-center">
+      <div className="h-screen w-full flex items-center justify-center p-6 bg-bg-main text-main">
+        <div className="max-w-md w-full glass p-8 rounded-2xl text-center border border-main">
           <ShieldAlert className="w-16 h-16 text-red-500 mx-auto mb-6" />
           <h2 className="text-2xl font-bold mb-4">Truy cập bị chặn</h2>
-          <p className="text-neutral-400 mb-6">Địa chỉ IP ({userIp}) của bạn đã bị chặn khỏi hệ thống này.</p>
+          <p className="text-dim mb-6">Địa chỉ IP ({userIp}) của bạn đã bị chặn khỏi hệ thống này.</p>
           <button onClick={() => signOut(auth)} className="btn-primary w-full py-3">Quay lại</button>
         </div>
       </div>
@@ -893,11 +982,11 @@ export default function App() {
   // Location Denied Screen
   if (locationStatus === 'denied' && profile?.role !== 'admin') {
     return (
-      <div className="h-screen w-full flex items-center justify-center p-6 bg-[#0a0a0a] text-white">
-        <div className="max-w-md w-full glass p-8 rounded-2xl text-center">
+      <div className="h-screen w-full flex items-center justify-center p-6 bg-bg-main text-main">
+        <div className="max-w-md w-full glass p-8 rounded-2xl text-center border border-main">
           <AlertTriangle className="w-16 h-16 text-yellow-500 mx-auto mb-6" />
           <h2 className="text-2xl font-bold mb-4">Yêu cầu vị trí</h2>
-          <p className="text-neutral-400 mb-6">Hệ thống yêu cầu quyền truy cập vị trí để hoạt động. Vui lòng bật vị trí trong cài đặt trình duyệt và tải lại trang.</p>
+          <p className="text-dim mb-6">Hệ thống yêu cầu quyền truy cập vị trí để hoạt động. Vui lòng bật vị trí trong cài đặt trình duyệt và tải lại trang.</p>
           <button onClick={() => window.location.reload()} className="btn-primary w-full py-3">Tải lại trang</button>
         </div>
       </div>
@@ -907,13 +996,13 @@ export default function App() {
   // User Disabled Screen
   if ((profile?.isDisabled || profile?.status === 'locked') && profile?.role !== 'admin') {
     return (
-      <div className="h-screen w-full flex items-center justify-center p-6 bg-[#0a0a0a] text-white">
-        <div className="max-w-md w-full glass p-10 rounded-3xl text-center shadow-2xl border border-red-500/20">
+      <div className="h-screen w-full flex items-center justify-center p-6 bg-bg-main text-main">
+        <div className="max-w-md w-full glass p-10 rounded-3xl text-center shadow-2xl border border-main">
           <div className="w-20 h-20 bg-red-500/10 rounded-full flex items-center justify-center mx-auto mb-8">
             <Lock className="w-10 h-10 text-red-500" />
           </div>
           <h2 className="text-2xl font-bold mb-4 text-red-500">Tài khoản bị khóa</h2>
-          <p className="text-neutral-400 mb-8 leading-relaxed">
+          <p className="text-dim mb-8 leading-relaxed">
             Tài khoản của bạn đã bị vô hiệu hóa hoặc bị khóa bởi quản trị viên. 
             Vui lòng liên hệ để được hỗ trợ mở khóa.
           </p>
@@ -928,9 +1017,9 @@ export default function App() {
               Đăng xuất tài khoản hiện tại
             </button>
             <div className="flex items-center gap-4 py-2">
-              <div className="h-px flex-1 bg-neutral-800"></div>
-              <span className="text-xs text-neutral-600 font-bold uppercase tracking-widest">Hoặc</span>
-              <div className="h-px flex-1 bg-neutral-800"></div>
+              <div className="h-px flex-1 bg-main/10"></div>
+              <span className="text-xs text-dim font-bold uppercase tracking-widest">Hoặc</span>
+              <div className="h-px flex-1 bg-main/10"></div>
             </div>
             <button 
               onClick={() => {
@@ -951,11 +1040,11 @@ export default function App() {
   // 404 Screen
   if (isNotFound) {
     return (
-      <div className="h-screen w-full flex items-center justify-center p-6 bg-[#0a0a0a] text-white">
-        <div className="max-w-md w-full glass p-8 rounded-2xl text-center">
+      <div className="h-screen w-full flex items-center justify-center p-6 bg-bg-main text-main">
+        <div className="max-w-md w-full glass p-8 rounded-2xl text-center border border-main">
           <AlertTriangle className="w-16 h-16 text-red-500 mx-auto mb-6" />
           <h2 className="text-4xl font-bold mb-4">404</h2>
-          <p className="text-neutral-400 mb-6">Trang bạn tìm kiếm không tồn tại.</p>
+          <p className="text-dim mb-6">Trang bạn tìm kiếm không tồn tại.</p>
           <button onClick={() => window.location.href = '/'} className="btn-primary w-full py-3">Quay lại trang chủ</button>
         </div>
       </div>
@@ -965,8 +1054,8 @@ export default function App() {
   // Maintenance Screen
   if (settings?.isMaintenance && profile?.role !== 'admin' && !showSecretLogin) {
     return (
-      <div className="h-screen w-full flex items-center justify-center p-6 bg-[#0a0a0a] text-white">
-        <div className="max-w-md w-full glass p-8 rounded-2xl text-center">
+      <div className="h-screen w-full flex items-center justify-center p-6 bg-bg-main text-main">
+        <div className="max-w-md w-full glass p-8 rounded-2xl text-center border border-main">
           <Settings 
             className="w-16 h-16 text-blue-500 mx-auto mb-6 animate-spin-slow cursor-pointer" 
             onClick={() => {
@@ -977,7 +1066,31 @@ export default function App() {
             }}
           />
           <h2 className="text-2xl font-bold mb-4">Hệ thống bảo trì</h2>
-          <p className="text-neutral-400">Chúng tôi đang nâng cấp hệ thống. Vui lòng quay lại sau.</p>
+          <p className="text-dim mb-6">Chúng tôi đang nâng cấp hệ thống. Vui lòng quay lại sau.</p>
+          
+          {user && (
+            <div className="flex items-center justify-between p-3 bg-surface/50 rounded-xl border border-main mb-6 max-w-xs mx-auto text-left">
+              <div className="flex items-center gap-3 min-w-0">
+                <img 
+                  src={user.photoURL || 'https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y'} 
+                  className="w-10 h-10 rounded-full border border-main" 
+                  alt="Avatar" 
+                  referrerPolicy="no-referrer"
+                />
+                <div className="flex flex-col min-w-0">
+                  <span className="text-sm font-bold text-main truncate">{user.displayName || 'Người dùng'}</span>
+                  <span className="text-xs text-dim truncate">{user.email}</span>
+                </div>
+              </div>
+              <button 
+                onClick={() => signOut(auth)}
+                className="p-2 text-dim hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
+                title="Đăng xuất"
+              >
+                <LogOut className="w-5 h-5" />
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -985,69 +1098,90 @@ export default function App() {
 
   if (!user) {
     return (
-      <div className="h-screen w-full flex items-center justify-center p-6 bg-[#0a0a0a]">
+      <div className="h-screen w-full flex items-center justify-center p-6 bg-bg-main text-main">
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full glass p-8 rounded-2xl shadow-2xl text-center"
+          className="max-w-md w-full glass p-8 rounded-2xl shadow-2xl text-center border border-main"
         >
           <div className="w-20 h-20 bg-blue-500/10 rounded-2xl flex items-center justify-center mx-auto mb-6 overflow-hidden">
             <img src={SITE_LOGO} className="w-full h-full object-cover" alt="Logo" />
           </div>
           <h1 className="text-3xl font-bold mb-2">Quản lý Mật khẩu</h1>
-          <p className="text-neutral-400 mb-8">Bảo mật mật khẩu cấp doanh nghiệp cho cuộc sống số của bạn.</p>
+          <p className="text-dim mb-8">Bảo mật mật khẩu cấp doanh nghiệp cho cuộc sống số của bạn.</p>
           <button 
             onClick={handleLogin}
-            className="w-full flex items-center justify-center gap-3 bg-white text-black font-semibold py-3 px-6 rounded-xl hover:bg-neutral-200 transition-all active:scale-95"
+            className="w-full flex items-center justify-center gap-3 bg-main text-bg-main font-semibold py-3 px-6 rounded-xl hover:opacity-90 transition-all active:scale-95"
           >
             <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
             Đăng nhập với Google
           </button>
         </motion.div>
-        <Toaster position="top-center" theme="dark" />
+        <Toaster position="top-center" theme={theme === 'system' ? 'dark' : theme} />
       </div>
     );
   }
 
   if (!isSecondaryAuthPassed) {
     return (
-      <div className="h-screen w-full flex items-center justify-center p-6 bg-[#0a0a0a]">
-        <div className="max-w-md w-full glass p-8 rounded-2xl shadow-2xl">
-          <div className="flex items-center gap-4 mb-8">
-            <div className="w-12 h-12 bg-blue-500/10 rounded-xl flex items-center justify-center">
-              <Lock className="w-6 h-6 text-blue-500" />
+      <div className="h-screen w-full flex items-center justify-center p-6 bg-bg-main text-main">
+        <div className="max-w-md w-full glass p-8 rounded-2xl shadow-2xl border border-main">
+          {user && (
+            <div className="flex items-center justify-between p-3 bg-surface/50 rounded-xl border border-main mb-6 mt-2">
+              <div className="flex items-center gap-3 min-w-0">
+                <img 
+                  src={user.photoURL || 'https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y'} 
+                  className="w-10 h-10 rounded-full border border-main" 
+                  alt="Avatar" 
+                  referrerPolicy="no-referrer"
+                />
+                <div className="flex flex-col min-w-0">
+                  <span className="text-sm font-bold text-main truncate">{user.displayName || 'Người dùng'}</span>
+                  <span className="text-xs text-dim truncate">{user.email}</span>
+                </div>
+              </div>
+              <button 
+                onClick={() => signOut(auth)}
+                className="p-2 text-dim hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
+                title="Đăng xuất"
+              >
+                <LogOut className="w-5 h-5" />
+              </button>
             </div>
-            <div>
-              <h2 className="text-xl font-bold">Xác thực đa lớp</h2>
-              <p className="text-xs text-neutral-400">Yêu cầu xác minh để tiếp tục</p>
-            </div>
-          </div>
+          )}
           
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-neutral-400 mb-1.5">Mã OTP</label>
+              <label className="block text-sm font-medium text-dim mb-1.5">Mã NumberID</label>
               <input 
                 type="text" 
                 inputMode="numeric"
                 pattern="[0-9]*"
-                value={otpInput}
-                onChange={(e) => setOtpInput(e.target.value.replace(/[^0-9]/g, ''))}
-                placeholder="Nhập mã OTP 6 số"
+                value={numberIDInput}
+                onChange={(e) => setNumberIDInput(e.target.value.replace(/[^0-9]/g, ''))}
+                placeholder={profile?.isFirstLogin ? `Mã NumberID của bạn: ${profile?.numberID}` : "Nhập mã NumberID 6 số"}
                 className="w-full input-field"
               />
+              {profile?.isFirstLogin && (
+                <p className="mt-1 text-[10px] text-blue-400 animate-pulse">
+                  Chào mừng! Mã NumberID mặc định của bạn là: <span className="font-bold">{profile?.numberID}</span>
+                </p>
+              )}
             </div>
+            {profile?.secondaryPassword && (
+              <div>
+                <label className="block text-sm font-medium text-dim mb-1.5">Mật khẩu cấp 2</label>
+                <input 
+                  type="password" 
+                  value={pass2Input}
+                  onChange={(e) => setPass2Input(e.target.value)}
+                  placeholder="Nhập mật khẩu cấp 2"
+                  className="w-full input-field"
+                />
+              </div>
+            )}
             <div>
-              <label className="block text-sm font-medium text-neutral-400 mb-1.5">Mật khẩu cấp 2</label>
-              <input 
-                type="password" 
-                value={pass2Input}
-                onChange={(e) => setPass2Input(e.target.value)}
-                placeholder="Nhập mật khẩu cấp 2"
-                className="w-full input-field"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-neutral-400 mb-1.5">Mã truy cập (Key)</label>
+              <label className="block text-sm font-medium text-dim mb-1.5">Mã truy cập (Key)</label>
               <input 
                 type="text" 
                 value={accessKeyInput}
@@ -1063,17 +1197,17 @@ export default function App() {
                   onChange={(e) => setRememberKey(e.target.checked)}
                   className="w-4 h-4 accent-blue-500"
                 />
-                <label htmlFor="rememberKey" className="text-xs text-neutral-400 cursor-pointer">Ghi nhớ mã truy cập</label>
+                <label htmlFor="rememberKey" className="text-xs text-dim cursor-pointer">Ghi nhớ mã truy cập</label>
               </div>
             </div>
 
-            <div className="pt-2 space-y-3">
+            <div className="pt-2">
               <button 
                 onClick={handleSecondaryAuth}
                 className="w-full btn-primary py-3 flex items-center justify-center gap-2"
               >
                 <CheckCircle2 className="w-5 h-5" />
-                Xác minh & Vào hệ thống
+                Đăng nhập
               </button>
             </div>
 
@@ -1085,17 +1219,6 @@ export default function App() {
                 Mỗi người dùng sẽ được cấp một mã truy cập (Key) riêng biệt. Vui lòng liên hệ Admin để nhận mã.
               </p>
             </div>
-
-            <button 
-              onClick={handleLogout}
-              className="w-full bg-red-600/10 hover:bg-red-600/20 text-red-500 font-bold py-3 rounded-xl transition-all active:scale-95 mt-2"
-            >
-              Đăng xuất
-            </button>
-            
-            <p className="text-[10px] text-center text-neutral-600 mt-4">
-              Nếu quên mã truy cập, vui lòng liên hệ Admin để được cấp lại.
-            </p>
           </div>
         </div>
         <Toaster position="top-center" theme="dark" />
@@ -1106,7 +1229,8 @@ export default function App() {
   const isPersonalTabOwner = activePasswordTab === userTabs.find(t => t.ownerId === user?.uid)?.id;
 
   return (
-    <div className="h-screen flex bg-[#0a0a0a] text-white relative overflow-hidden">
+    <div className={`h-screen flex relative overflow-hidden transition-colors duration-300 ${theme === 'dark' ? 'dark bg-[#0a0a0a] text-white' : theme === 'light' ? 'light bg-slate-50 text-slate-900' : 'bg-[#0a0a0a] text-white'}`}>
+      <div className="bg-gradient-animate" />
       {/* Watermark */}
       <div className="pointer-events-none fixed inset-0 z-0 flex items-center justify-center opacity-[0.03] select-none">
         <div className="transform -rotate-45 text-center">
@@ -1125,7 +1249,7 @@ export default function App() {
       )}
 
       {/* Sidebar */}
-      <aside className={`fixed inset-y-0 left-0 z-50 w-64 glass border-r border-neutral-800 transform transition-transform duration-300 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} lg:relative lg:translate-x-0`}>
+      <aside className={`fixed inset-y-0 left-0 z-50 w-64 glass border-r border-main transform transition-transform duration-300 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} lg:relative lg:translate-x-0`}>
         <div className="p-6 flex flex-col h-full">
           <div className="flex items-center justify-between mb-10">
             <div className="flex items-center gap-3">
@@ -1134,7 +1258,7 @@ export default function App() {
               </div>
               <span className="text-xl font-bold tracking-tight">SecurePass</span>
             </div>
-            <button onClick={() => setIsSidebarOpen(false)} className="lg:hidden p-2 hover:bg-neutral-800 rounded-lg">
+            <button onClick={() => setIsSidebarOpen(false)} className="lg:hidden p-2 hover:bg-surface rounded-lg">
               <X className="w-5 h-5" />
             </button>
           </div>
@@ -1146,42 +1270,56 @@ export default function App() {
               active={activeTab === 'passwords'} 
               onClick={() => setActiveTab('passwords')} 
             />
+            <NavItem 
+              icon={<UserIcon className="w-5 h-5" />} 
+              label="Tài khoản" 
+              active={activeTab === 'account'} 
+              onClick={() => setActiveTab('account')} 
+            />
             {profile?.role === 'admin' && (
               <>
-                <NavItem 
-                  icon={<Users className="w-5 h-5" />} 
-                  label="Người dùng" 
-                  active={activeTab === 'users'} 
-                  onClick={() => setActiveTab('users')} 
-                />
-                <NavItem 
-                  icon={<FolderKey className="w-5 h-5" />} 
-                  label="Tab Mật khẩu User" 
-                  active={activeTab === 'userTabs'} 
-                  onClick={() => setActiveTab('userTabs')} 
-                />
-                <NavItem 
-                  icon={<History className="w-5 h-5" />} 
-                  label="Nhật ký" 
-                  active={activeTab === 'logs'} 
-                  onClick={() => setActiveTab('logs')} 
-                />
-                <NavItem 
-                  icon={<Settings className="w-5 h-5" />} 
-                  label="Cài đặt" 
-                  active={activeTab === 'settings'} 
-                  onClick={() => setActiveTab('settings')} 
-                />
+                {(profile.isSuperAdmin || profile.permissions?.manageUsers) && (
+                  <NavItem 
+                    icon={<Users className="w-5 h-5" />} 
+                    label="Người dùng" 
+                    active={activeTab === 'users'} 
+                    onClick={() => setActiveTab('users')} 
+                  />
+                )}
+                {(profile.isSuperAdmin || profile.permissions?.manageUserTabs) && (
+                  <NavItem 
+                    icon={<FolderKey className="w-5 h-5" />} 
+                    label="Tab Mật khẩu User" 
+                    active={activeTab === 'userTabs'} 
+                    onClick={() => setActiveTab('userTabs')} 
+                  />
+                )}
+                {(profile.isSuperAdmin || profile.permissions?.viewLogs) && (
+                  <NavItem 
+                    icon={<History className="w-5 h-5" />} 
+                    label="Nhật ký" 
+                    active={activeTab === 'logs'} 
+                    onClick={() => setActiveTab('logs')} 
+                  />
+                )}
+                {(profile.isSuperAdmin || profile.permissions?.manageSettings) && (
+                  <NavItem 
+                    icon={<ShieldAlert className="w-5 h-5" />} 
+                    label="Hệ thống & Admin" 
+                    active={activeTab === 'adminSystem'} 
+                    onClick={() => setActiveTab('adminSystem')} 
+                  />
+                )}
               </>
             )}
           </nav>
 
-          <div className="mt-auto pt-6 border-t border-neutral-800 space-y-4">
+          <div className="mt-auto pt-6 border-t border-main space-y-4">
             <div className="flex items-center gap-3 p-2">
-              <img src={profile?.photoURL} className="w-10 h-10 rounded-full border border-neutral-700" alt="User" />
+              <img src={profile?.photoURL} className="w-10 h-10 rounded-full border border-main" alt="User" />
               <div className="overflow-hidden">
                 <p className="text-sm font-medium truncate">{profile?.displayName}</p>
-                <p className="text-xs text-neutral-500 truncate">{profile?.email}</p>
+                <p className="text-xs text-dim truncate">{profile?.email}</p>
               </div>
             </div>
             <button 
@@ -1198,22 +1336,22 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Header */}
-        <header className="h-16 glass border-b border-neutral-800 flex items-center justify-between px-6 sticky top-0 z-40">
+        <header className="h-16 glass border-b border-main flex items-center justify-between px-6 sticky top-0 z-40">
           <div className="flex items-center gap-4">
-            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="lg:hidden p-2 hover:bg-neutral-800 rounded-lg">
+            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="lg:hidden p-2 hover:bg-surface rounded-lg">
               {isSidebarOpen ? <X /> : <Menu />}
             </button>
             <h2 className="text-lg font-semibold capitalize">
-              {activeTab === 'passwords' ? 'Mật khẩu' : activeTab === 'users' ? 'Người dùng' : activeTab === 'userTabs' ? 'Tab Mật khẩu User' : activeTab === 'logs' ? 'Nhật ký' : 'Cài đặt'}
+              {activeTab === 'passwords' ? 'Mật khẩu' : activeTab === 'profile' ? 'Bảo mật cá nhân' : activeTab === 'users' ? 'Người dùng' : activeTab === 'userTabs' ? 'Tab Mật khẩu User' : activeTab === 'logs' ? 'Nhật ký' : activeTab === 'adminSystem' ? 'Hệ thống & Admin' : 'Cài đặt'}
             </h2>
           </div>
           <div className="flex items-center gap-4">
             <div className="hidden md:flex flex-col items-end">
-              <div className="flex items-center gap-2 text-[10px] text-neutral-500">
+              <div className="flex items-center gap-2 text-[10px] text-dim">
                 <Clock className="w-3 h-3" />
                 <span>Lần đầu: {profile?.firstLogin ? format(parseISO(profile.firstLogin), 'HH:mm dd/MM') : 'N/A'}</span>
               </div>
-              <div className="flex items-center gap-2 text-[10px] text-neutral-400">
+              <div className="flex items-center gap-2 text-[10px] text-dim">
                 <History className="w-3 h-3" />
                 <span>Gần nhất: {profile?.lastLogin ? format(parseISO(profile.lastLogin), 'HH:mm dd/MM') : 'N/A'}</span>
               </div>
@@ -1242,23 +1380,23 @@ export default function App() {
                 {profile?.role === 'admin' && (
                   <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                     <div className="glass p-4 rounded-xl">
-                      <p className="text-[10px] text-neutral-500 uppercase font-bold mb-1">MK Chung</p>
+                      <p className="text-[10px] text-dim uppercase font-bold mb-1">MK Chung</p>
                       <p className="text-2xl font-bold text-blue-500">{stats.totalGeneralPasswords}</p>
                     </div>
                     <div className="glass p-4 rounded-xl">
-                      <p className="text-[10px] text-neutral-500 uppercase font-bold mb-1">MK Tab Con</p>
+                      <p className="text-[10px] text-dim uppercase font-bold mb-1">MK Tab Con</p>
                       <p className="text-2xl font-bold text-purple-500">{stats.totalTabPasswords}</p>
                     </div>
                     <div className="glass p-4 rounded-xl">
-                      <p className="text-[10px] text-neutral-500 uppercase font-bold mb-1">Người dùng</p>
+                      <p className="text-[10px] text-dim uppercase font-bold mb-1">Người dùng</p>
                       <p className="text-2xl font-bold text-green-500">{stats.totalUsers}</p>
                     </div>
                     <div className="glass p-4 rounded-xl">
-                      <p className="text-[10px] text-neutral-500 uppercase font-bold mb-1">Hoạt động</p>
+                      <p className="text-[10px] text-dim uppercase font-bold mb-1">Hoạt động</p>
                       <p className="text-2xl font-bold text-yellow-500">{stats.activeUsers}</p>
                     </div>
                     <div className="glass p-4 rounded-xl">
-                      <p className="text-[10px] text-neutral-500 uppercase font-bold mb-1">IP bị chặn</p>
+                      <p className="text-[10px] text-dim uppercase font-bold mb-1">IP bị chặn</p>
                       <p className="text-2xl font-bold text-red-500">{stats.blockedIpsCount}</p>
                     </div>
                   </div>
@@ -1271,7 +1409,7 @@ export default function App() {
                     className={`px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
                       activePasswordTab === 'general' 
                         ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' 
-                        : 'bg-neutral-900/50 text-neutral-400 hover:bg-neutral-800 hover:text-white'
+                        : 'bg-surface/50 text-dim hover:bg-surface hover:text-main'
                     }`}
                   >
                     <FolderOpen className="w-4 h-4" />
@@ -1292,7 +1430,7 @@ export default function App() {
                       className={`px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
                         activePasswordTab === tab.id 
                           ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' 
-                          : 'bg-neutral-900/50 text-neutral-400 hover:bg-neutral-800 hover:text-white'
+                          : 'bg-surface/50 text-dim hover:bg-surface hover:text-main'
                       }`}
                     >
                       {unlockedTabs.includes(tab.id) ? <FolderOpen className="w-4 h-4" /> : <FolderLock className="w-4 h-4" />}
@@ -1314,7 +1452,7 @@ export default function App() {
                       className={`px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
                         activePasswordTab === tab.id 
                           ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' 
-                          : 'bg-neutral-900/50 text-neutral-400 hover:bg-neutral-800 hover:text-white'
+                          : 'bg-surface/50 text-dim hover:bg-surface hover:text-main'
                       }`}
                     >
                       {unlockedTabs.includes(tab.id) ? <FolderOpen className="w-4 h-4" /> : <FolderLock className="w-4 h-4" />}
@@ -1339,7 +1477,7 @@ export default function App() {
                           className={`px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
                             activePasswordTab === myTab.id 
                               ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/20' 
-                              : 'bg-neutral-900/50 text-neutral-400 hover:bg-neutral-800 hover:text-white'
+                              : 'bg-surface/50 text-dim hover:bg-surface hover:text-main'
                           }`}
                         >
                           {unlockedTabs.includes(myTab.id) ? <FolderOpen className="w-4 h-4" /> : <FolderLock className="w-4 h-4" />}
@@ -1357,7 +1495,7 @@ export default function App() {
                   })() : (
                     <button
                       onClick={() => setIsCreateUserTabModalOpen(true)}
-                      className="px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 bg-neutral-900/50 text-neutral-400 hover:bg-neutral-800 hover:text-white border border-dashed border-neutral-700"
+                      className="px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 bg-surface/50 text-dim hover:bg-surface hover:text-main border border-dashed border-main"
                     >
                       <Plus className="w-4 h-4" />
                       Tạo tab cá nhân
@@ -1370,7 +1508,7 @@ export default function App() {
                       className={`px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ml-auto ${
                         activePasswordTab === 'trash' 
                           ? 'bg-red-600 text-white shadow-lg shadow-red-600/20' 
-                          : 'bg-neutral-900/50 text-neutral-400 hover:bg-neutral-800 hover:text-white'
+                          : 'bg-surface/50 text-dim hover:bg-surface hover:text-main'
                       }`}
                     >
                       <Trash2 className="w-4 h-4" />
@@ -1382,22 +1520,22 @@ export default function App() {
                 {/* Actions Bar */}
                 <div className="flex flex-col md:flex-row gap-4 justify-between">
                   <div className="relative flex-1 max-w-md">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-dim" />
                     <input 
                       type="text" 
                       placeholder="Tìm kiếm mật khẩu..." 
-                      className="w-full bg-neutral-900 border border-neutral-800 rounded-xl pl-10 pr-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500/50 outline-none"
+                      className="w-full bg-surface border border-main rounded-xl pl-10 pr-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500/50 outline-none text-main"
                       value={searchTerm}
                       onChange={(e) => setSearchTerm(e.target.value)}
                     />
                   </div>
                   {(profile?.role === 'admin' || isPersonalTabOwner) && activePasswordTab !== 'trash' && (
                     <div className="flex gap-2">
-                      <button onClick={handleExportExcel} className="flex items-center gap-2 bg-neutral-800 hover:bg-neutral-700 px-4 py-2.5 rounded-xl text-sm font-medium transition-all">
+                      <button onClick={handleExportExcel} className="flex items-center gap-2 bg-surface hover:bg-surface/80 px-4 py-2.5 rounded-xl text-sm font-medium transition-all border border-main">
                         <Download className="w-4 h-4" />
                         Xuất Excel
                       </button>
-                      <label className="flex items-center gap-2 bg-neutral-800 hover:bg-neutral-700 px-4 py-2.5 rounded-xl text-sm font-medium transition-all cursor-pointer">
+                      <label className="flex items-center gap-2 bg-surface hover:bg-surface/80 px-4 py-2.5 rounded-xl text-sm font-medium transition-all cursor-pointer border border-main">
                         <Upload className="w-4 h-4" />
                         Nhập Excel
                         <input type="file" accept=".xlsx" className="hidden" onChange={handleImportExcel} />
@@ -1514,14 +1652,18 @@ export default function App() {
                       </thead>
                       <tbody className="divide-y divide-neutral-800">
                         {users.filter(u => 
-                          u.displayName?.toLowerCase().includes(userSearchTerm.toLowerCase()) || 
-                          u.email.toLowerCase().includes(userSearchTerm.toLowerCase())
+                          u.role !== 'admin' && (
+                            u.displayName?.toLowerCase().includes(userSearchTerm.toLowerCase()) || 
+                            u.email.toLowerCase().includes(userSearchTerm.toLowerCase())
+                          )
                         ).map((u) => (
                           <UserRow 
                             key={u.uid} 
                             user={u} 
                             onUpdate={handleUpdateUserAccess} 
                             onDelete={handleDeleteUser}
+                            isSuperAdmin={profile?.isSuperAdmin}
+                            onManagePermissions={setEditingPermissionsUser}
                           />
                         ))}
                       </tbody>
@@ -1577,7 +1719,7 @@ export default function App() {
                         }).map((tab) => {
                           const owner = users.find(u => u.uid === tab.ownerId);
                           return (
-                            <tr key={tab.id} className="hover:bg-neutral-800/30 transition-colors">
+                            <tr key={tab.id} className="hover:bg-surface/30 transition-colors">
                               <td className="px-6 py-4 text-sm text-white font-medium">{tab.name}</td>
                               <td className="px-6 py-4 text-sm text-neutral-300">
                                 {owner ? (
@@ -1664,7 +1806,7 @@ export default function App() {
                     <select 
                       value={logActionFilter}
                       onChange={(e) => setLogActionFilter(e.target.value)}
-                      className="bg-neutral-800 border border-neutral-800 rounded-xl px-4 py-2.5 text-sm outline-none"
+                      className="bg-surface border border-main rounded-xl px-4 py-2.5 text-sm outline-none text-main"
                     >
                       <option value="all">Tất cả hành động</option>
                       <option value="login">Đăng nhập</option>
@@ -1731,22 +1873,78 @@ export default function App() {
               </motion.div>
             )}
 
-            {activeTab === 'settings' && profile?.role === 'admin' && (
+            {activeTab === 'account' && (
               <motion.div 
-                key="settings"
+                key="account"
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -20 }}
-                className="max-w-2xl mx-auto space-y-6"
               >
-                <div className="glass p-8 rounded-2xl space-y-8">
-                  <div className="flex items-center gap-4">
+                <AccountSection 
+                  profile={profile} 
+                  theme={theme} 
+                  setTheme={setTheme} 
+                />
+              </motion.div>
+            )}
+
+            {activeTab === 'adminSystem' && profile?.role === 'admin' && (
+              <motion.div 
+                key="adminSystem"
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+                className="space-y-8"
+              >
+                {/* Admin Accounts Section */}
+                <div className="glass rounded-2xl overflow-hidden p-6 border border-blue-500/20">
+                  <div className="flex items-center gap-4 mb-6">
                     <div className="w-12 h-12 bg-blue-500/10 rounded-xl flex items-center justify-center">
-                      <Settings className="w-6 h-6 text-blue-500" />
+                      <ShieldAlert className="w-6 h-6 text-blue-500" />
                     </div>
                     <div>
-                      <h3 className="text-xl font-bold">Cấu hình hệ thống</h3>
-                      <p className="text-sm text-neutral-400">Quản lý bảo mật và bảo trì toàn cục</p>
+                      <h3 className="text-xl font-bold">Tài khoản Quản trị viên</h3>
+                      <p className="text-sm text-neutral-400">Quản lý các tài khoản có quyền vận hành hệ thống</p>
+                    </div>
+                  </div>
+                  
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="bg-surface/50 text-dim text-xs uppercase tracking-wider">
+                          <th className="px-6 py-4 font-semibold">Admin</th>
+                          <th className="px-6 py-4 font-semibold">Vai trò</th>
+                          <th className="px-6 py-4 font-semibold">Truy cập</th>
+                          <th className="px-6 py-4 font-semibold">Trạng thái</th>
+                          <th className="px-6 py-4 font-semibold">Bảo mật</th>
+                          <th className="px-6 py-4 font-semibold text-right">Hành động</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-main/10">
+                        {users.filter(u => u.role === 'admin').map((u) => (
+                          <UserRow 
+                            key={u.uid} 
+                            user={u} 
+                            onUpdate={handleUpdateUserAccess} 
+                            onDelete={handleDeleteUser}
+                            isSuperAdmin={profile?.isSuperAdmin}
+                            onManagePermissions={setEditingPermissionsUser}
+                          />
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* System Settings Section */}
+                <div className="max-w-2xl mx-auto glass p-8 rounded-2xl space-y-8 border border-main">
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 bg-purple-500/10 rounded-xl flex items-center justify-center">
+                      <Settings className="w-6 h-6 text-purple-500" />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-bold text-main">Cấu hình hệ thống</h3>
+                      <p className="text-sm text-dim">Quản lý bảo mật và bảo trì toàn cục</p>
                     </div>
                   </div>
 
@@ -1754,23 +1952,34 @@ export default function App() {
                     e.preventDefault();
                     const formData = new FormData(e.currentTarget);
                     handleUpdateSettings(
-                      formData.get('otp') as string,
+                      formData.get('numberID') as string,
                       formData.get('pass2') as string,
                       (e.currentTarget.elements.namedItem('maintenance') as HTMLInputElement).checked,
                       formData.get('blockedIps') as string,
-                      settings?.contactMethods || [],
-                      formData.get('specialPassword') as string,
-                      formData.get('specialPasswordHint') as string
+                      settings?.contactMethods || []
                     );
                   }}>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div>
-                        <label className="block text-sm font-medium text-neutral-400 mb-2">Smart OTP</label>
-                        <input name="otp" type="text" inputMode="numeric" defaultValue={settings?.otp} className="w-full input-field" />
+                        <label className="block text-sm font-medium text-neutral-400 mb-2">Smart NumberID</label>
+                        <input 
+                          name="numberID" 
+                          type="text" 
+                          inputMode="numeric" 
+                          defaultValue={settings?.numberID} 
+                          className="w-full input-field disabled:opacity-50 disabled:cursor-not-allowed" 
+                          disabled={!profile?.isSuperAdmin}
+                        />
                       </div>
                       <div>
                         <label className="block text-sm font-medium text-neutral-400 mb-2">Mật khẩu cấp 2</label>
-                        <input name="pass2" type="text" defaultValue={settings?.passwordLevel2} className="w-full input-field" />
+                        <input 
+                          name="pass2" 
+                          type="text" 
+                          defaultValue={settings?.passwordLevel2} 
+                          className="w-full input-field disabled:opacity-50 disabled:cursor-not-allowed" 
+                          disabled={!profile?.isSuperAdmin}
+                        />
                       </div>
                     </div>
 
@@ -1779,19 +1988,106 @@ export default function App() {
                         <Lock className="w-4 h-4" />
                         Bảo mật nâng cao (Admin)
                       </h3>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-xs font-medium text-neutral-500 mb-1.5 uppercase tracking-wider">Mật khẩu đặc biệt</label>
-                          <input 
-                            name="specialPassword"
-                            type="password" 
-                            defaultValue={settings?.specialPassword || ''}
-                            placeholder="Dùng để xóa nhật ký"
-                            className="w-full input-field py-2.5 text-sm"
-                          />
+                      <div className="space-y-4">
+                        <div className="flex flex-col gap-4 p-4 bg-surface/50 rounded-xl border border-main">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${settings?.specialPassword ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
+                                <Key className="w-5 h-5" />
+                              </div>
+                              <div>
+                                <p className="font-medium text-sm text-main">Mật khẩu đặc biệt</p>
+                                <p className="text-[10px] text-dim uppercase tracking-wider">
+                                  {settings?.specialPassword ? 'Đã thiết lập' : 'Chưa thiết lập'}
+                                </p>
+                              </div>
+                            </div>
+                            {!isChangingSpecialPass && (
+                              <button
+                                type="button"
+                                onClick={() => setIsChangingSpecialPass(true)}
+                                className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-xs font-bold transition-all"
+                              >
+                                {settings?.specialPassword ? 'Đổi mật khẩu' : 'Thiết lập ngay'}
+                              </button>
+                            )}
+                          </div>
+
+                          {isChangingSpecialPass && (
+                            <motion.div 
+                              initial={{ opacity: 0, height: 0 }}
+                              animate={{ opacity: 1, height: 'auto' }}
+                              className="space-y-4 pt-4 border-t border-main"
+                            >
+                              {settings?.specialPassword && (
+                                <div className="space-y-1.5">
+                                  <label className="text-[10px] text-dim uppercase font-bold">Mật khẩu cũ</label>
+                                  <input 
+                                    type="password"
+                                    value={oldSpecialPassInput}
+                                    onChange={(e) => setOldSpecialPassInput(e.target.value)}
+                                    className="w-full input-field py-2 text-sm"
+                                    placeholder="Nhập mật khẩu cũ để xác nhận"
+                                  />
+                                </div>
+                              )}
+                              <div className="space-y-1.5">
+                                <label className="text-[10px] text-dim uppercase font-bold">Mật khẩu mới</label>
+                                <input 
+                                  type="password"
+                                  value={newSpecialPassInput}
+                                  onChange={(e) => setNewSpecialPassInput(e.target.value)}
+                                  className="w-full input-field py-2 text-sm"
+                                  placeholder="Nhập mật khẩu mới"
+                                />
+                              </div>
+                              <div className="flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (settings?.specialPassword && oldSpecialPassInput !== settings.specialPassword) {
+                                      toast.error('Mật khẩu cũ không chính xác');
+                                      return;
+                                    }
+                                    if (!newSpecialPassInput) {
+                                      toast.error('Vui lòng nhập mật khẩu mới');
+                                      return;
+                                    }
+                                    handleUpdateSettings(
+                                      settings?.numberID || '',
+                                      settings?.passwordLevel2 || '',
+                                      settings?.isMaintenance || false,
+                                      settings?.blockedIps?.join(', ') || '',
+                                      settings?.contactMethods || [],
+                                      newSpecialPassInput,
+                                      settings?.specialPasswordHint || ''
+                                    );
+                                    setIsChangingSpecialPass(false);
+                                    setOldSpecialPassInput('');
+                                    setNewSpecialPassInput('');
+                                  }}
+                                  className="flex-1 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-bold transition-all"
+                                >
+                                  Xác nhận
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setIsChangingSpecialPass(false);
+                                    setOldSpecialPassInput('');
+                                    setNewSpecialPassInput('');
+                                  }}
+                                  className="flex-1 py-2 bg-surface hover:bg-surface/80 text-main rounded-lg text-xs font-bold transition-all border border-main"
+                                >
+                                  Hủy
+                                </button>
+                              </div>
+                            </motion.div>
+                          )}
                         </div>
-                        <div>
-                          <label className="block text-xs font-medium text-neutral-500 mb-1.5 uppercase tracking-wider">Gợi ý mật khẩu (Hint)</label>
+
+                        <div className="space-y-2">
+                          <label className="block text-xs font-medium text-neutral-500 uppercase tracking-wider">Gợi ý mật khẩu (Hint)</label>
                           <input 
                             name="specialPasswordHint"
                             type="text" 
@@ -1863,7 +2159,7 @@ export default function App() {
                                   newMethods[index].type = e.target.value as any;
                                   setSettings({ ...settings, contactMethods: newMethods });
                                 }}
-                                className="bg-neutral-900 border border-neutral-800 rounded-lg px-2 py-2 text-xs outline-none w-24"
+                                className="bg-surface border border-main rounded-lg px-2 py-2 text-xs outline-none w-24 text-main"
                               >
                                 <option value="phone">SĐT</option>
                                 <option value="email">Email</option>
@@ -1881,7 +2177,7 @@ export default function App() {
                                   newMethods[index].label = e.target.value;
                                   setSettings({ ...settings, contactMethods: newMethods });
                                 }}
-                                className="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-xs outline-none"
+                                className="flex-1 bg-surface border border-main rounded-lg px-3 py-2 text-xs outline-none text-main"
                               />
                               <input 
                                 type="text"
@@ -1892,7 +2188,7 @@ export default function App() {
                                   newMethods[index].value = e.target.value;
                                   setSettings({ ...settings, contactMethods: newMethods });
                                 }}
-                                className="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-xs outline-none"
+                                className="flex-1 bg-surface border border-main rounded-lg px-3 py-2 text-xs outline-none text-main"
                               />
                               <button 
                                 type="button"
@@ -1925,11 +2221,11 @@ export default function App() {
 
       {/* Add/Edit Modal */}
       <dialog id="add-modal" className="modal bg-black/60 backdrop-blur-sm">
-        <div className="modal-box glass border border-neutral-800 p-8 rounded-2xl max-w-md w-full">
+        <div className="modal-box glass border border-main p-8 rounded-2xl max-w-md w-full">
           <div className="flex items-center justify-between mb-8">
-            <h3 className="text-2xl font-bold">{editingPassword ? 'Chỉnh sửa mật khẩu' : 'Thêm mật khẩu mới'}</h3>
+            <h3 className="text-2xl font-bold text-main">{editingPassword ? 'Chỉnh sửa mật khẩu' : 'Thêm mật khẩu mới'}</h3>
             <form method="dialog">
-              <button onClick={() => setEditingPassword(null)} className="p-2 hover:bg-neutral-800 rounded-lg transition-colors"><X className="w-5 h-5" /></button>
+              <button onClick={() => setEditingPassword(null)} className="p-2 hover:bg-surface rounded-lg transition-colors"><X className="w-5 h-5 text-dim" /></button>
             </form>
           </div>
           
@@ -1947,11 +2243,11 @@ export default function App() {
             (document.getElementById('add-modal') as any)?.close();
           }} className="space-y-5">
             <div>
-              <label className="block text-sm font-medium text-neutral-400 mb-1.5">Trang web</label>
+              <label className="block text-sm font-medium text-dim mb-1.5">Trang web</label>
               <input name="website" type="text" defaultValue={editingPassword?.website} required placeholder="Ví dụ: facebook.com" className="w-full input-field" />
             </div>
             <div>
-              <label className="block text-sm font-medium text-neutral-400 mb-1.5">Tên đăng nhập</label>
+              <label className="block text-sm font-medium text-dim mb-1.5">Tên đăng nhập</label>
               <input name="username" type="text" defaultValue={editingPassword?.username} required placeholder="Email hoặc số điện thoại" className="w-full input-field" />
             </div>
             <div>
@@ -1984,7 +2280,7 @@ export default function App() {
               />
               {passwordInput && (
                 <div className="mt-2 flex items-center gap-2">
-                  <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+                  <div className="flex-1 h-1.5 bg-surface rounded-full overflow-hidden">
                     <div 
                       className={`h-full ${calculatePasswordStrength(passwordInput).color} transition-all duration-300`}
                       style={{ width: `${(calculatePasswordStrength(passwordInput).score / 5) * 100}%` }}
@@ -2028,7 +2324,7 @@ export default function App() {
             
             <div className="max-h-[200px] overflow-y-auto mb-6 space-y-2 pr-2 custom-scrollbar">
               {duplicateEntries.map((entry, idx) => (
-                <div key={idx} className="bg-neutral-800/50 p-3 rounded-xl border border-neutral-800 text-xs">
+                <div key={idx} className="bg-surface/50 p-3 rounded-xl border border-main text-xs text-main">
                   <p className="text-blue-400 font-bold">{entry.row.Website}</p>
                   <p className="text-neutral-500">{entry.row.Username}</p>
                 </div>
@@ -2044,7 +2340,7 @@ export default function App() {
               </button>
               <button 
                 onClick={() => confirmImport('create')}
-                className="w-full py-3 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white font-bold transition-all active:scale-95"
+                className="w-full py-3 rounded-xl bg-surface hover:bg-surface/80 text-main font-bold transition-all active:scale-95 border border-main"
               >
                 Tạo dữ liệu mới (Bản sao)
               </button>
@@ -2063,7 +2359,54 @@ export default function App() {
         </div>
       )}
 
-      <Toaster position="top-right" theme="dark" richColors />
+      <Toaster position="top-right" theme={theme === 'system' ? 'dark' : theme} richColors />
+
+      {/* First Login Modal */}
+      {editingPermissionsUser && (
+        <PermissionEditor 
+          user={editingPermissionsUser} 
+          onClose={() => setEditingPermissionsUser(null)} 
+        />
+      )}
+      <AnimatePresence>
+        {showFirstLoginModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="glass max-w-md w-full p-8 rounded-3xl border border-main text-center space-y-6"
+            >
+              <div className="w-20 h-20 bg-blue-500/20 rounded-full flex items-center justify-center mx-auto">
+                <ShieldCheck className="w-10 h-10 text-blue-500" />
+              </div>
+              <div className="space-y-2">
+                <h2 className="text-2xl font-bold text-main">Chào mừng bạn!</h2>
+                <p className="text-dim">Đây là lần đăng nhập đầu tiên của bạn. Vui lòng ghi chú lại mã NumberID bảo mật của bạn ngay lập tức.</p>
+              </div>
+              
+              <div className="bg-blue-500/10 p-6 rounded-2xl border border-blue-500/20 space-y-2">
+                <p className="text-xs text-blue-400 uppercase font-bold tracking-widest">Mã NumberID của bạn</p>
+                <p className="text-4xl font-mono font-black text-main tracking-tighter">{profile?.numberID}</p>
+              </div>
+
+              <div className="bg-yellow-500/10 p-4 rounded-xl border border-yellow-500/20 flex gap-3 text-left">
+                <AlertTriangle className="w-5 h-5 text-yellow-500 shrink-0" />
+                <p className="text-xs text-yellow-200/80 leading-relaxed">
+                  <span className="font-bold text-yellow-500">Lưu ý quan trọng:</span> Bạn sẽ không bao giờ có thể thay đổi mã này. Nếu quên, bạn phải liên hệ Admin để cấp lại.
+                </p>
+              </div>
+
+              <button
+                onClick={() => setShowFirstLoginModal(false)}
+                className="w-full py-4 bg-blue-500 hover:bg-blue-600 text-white rounded-2xl font-bold transition-all shadow-lg shadow-blue-500/20"
+              >
+                Tôi đã ghi chú lại
+              </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Delete Logs Modal */}
       {isDeletingLogs && (
@@ -2071,19 +2414,19 @@ export default function App() {
           <motion.div 
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
-            className="max-w-md w-full bg-neutral-900 border border-neutral-800 rounded-3xl p-8 shadow-2xl"
+            className="max-w-md w-full bg-surface border border-main rounded-3xl p-8 shadow-2xl"
           >
             <h3 className="font-bold text-xl text-red-500 flex items-center gap-3 mb-4">
               <AlertTriangle className="w-6 h-6" />
               Xác nhận xóa nhật ký
             </h3>
-            <p className="text-neutral-400 mb-8 leading-relaxed">
+            <p className="text-dim mb-8 leading-relaxed">
               Hành động này sẽ xóa toàn bộ nhật ký hoạt động của hệ thống. 
-              Bạn cần nhập <span className="text-white font-bold">Mật khẩu đặc biệt</span> để tiếp tục.
+              Bạn cần nhập <span className="text-main font-bold">Mật khẩu đặc biệt</span> để tiếp tục.
             </p>
             <div className="space-y-6">
               <div>
-                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-widest mb-2">Mật khẩu đặc biệt</label>
+                <label className="block text-xs font-bold text-dim uppercase tracking-widest mb-2">Mật khẩu đặc biệt</label>
                 <input 
                   type="password" 
                   value={specialPasswordInput}
@@ -2523,7 +2866,7 @@ function AdminPasswordTabsSettings({ passwordTabs, settings }: { passwordTabs: P
             <div className="flex items-center gap-3">
               <Lock className="w-4 h-4 text-neutral-500" />
               <span className="font-medium">{tab.name}</span>
-              {tab.isHidden && <span className="bg-neutral-800 text-neutral-400 px-2 py-0.5 rounded text-[10px] uppercase tracking-wider font-bold">Đang ẩn</span>}
+              {tab.isHidden && <span className="bg-surface text-dim px-2 py-0.5 rounded text-[10px] uppercase tracking-wider font-bold">Đang ẩn</span>}
             </div>
             <div className="flex items-center gap-2">
               <button 
@@ -2537,7 +2880,7 @@ function AdminPasswordTabsSettings({ passwordTabs, settings }: { passwordTabs: P
                     toast.error('Lỗi khi cập nhật trạng thái tab');
                   }
                 }}
-                className={`p-2 rounded-lg transition-colors ${tab.isHidden ? 'text-neutral-500 hover:bg-neutral-800 hover:text-white' : 'text-blue-400 hover:bg-blue-500/10'}`}
+                className={`p-2 rounded-lg transition-colors ${tab.isHidden ? 'text-dim hover:bg-surface hover:text-main' : 'text-blue-400 hover:bg-blue-500/10'}`}
                 title={tab.isHidden ? "Hiện tab này" : "Ẩn tab này"}
               >
                 {tab.isHidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -2567,6 +2910,235 @@ function AdminPasswordTabsSettings({ passwordTabs, settings }: { passwordTabs: P
   );
 }
 
+function AccountSection({ 
+  profile, 
+  theme, 
+  setTheme 
+}: { 
+  profile: UserProfile | null, 
+  theme: 'light' | 'dark' | 'system',
+  setTheme: (t: 'light' | 'dark' | 'system') => void
+}) {
+  const [pass2, setPass2] = useState('');
+  const [oldPass2, setOldPass2] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [activeSubTab, setActiveSubTab] = useState<'personal' | 'security' | 'privacy' | 'settings'>('personal');
+
+  const handleSaveSecurity = async () => {
+    if (!profile) return;
+    
+    // If already has password, require old password
+    if (profile.secondaryPassword && oldPass2 !== profile.secondaryPassword) {
+      toast.error('Mật khẩu cũ không chính xác');
+      return;
+    }
+
+    if (!pass2) {
+      toast.error('Vui lòng nhập mật khẩu mới');
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      await updateDoc(doc(db, 'users', profile.uid), {
+        secondaryPassword: pass2,
+        isFirstLogin: false
+      });
+      toast.success('Cập nhật bảo mật thành công');
+      setPass2('');
+      setOldPass2('');
+    } catch (error) {
+      console.error('Error updating security settings:', error);
+      toast.error('Cập nhật thất bại');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto space-y-8">
+      <div className="glass p-8 rounded-3xl border border-neutral-800">
+        <div className="flex flex-col md:flex-row gap-8 items-start">
+          {/* Sidebar for Account Section */}
+          <div className="w-full md:w-64 space-y-2">
+            <button 
+              onClick={() => setActiveSubTab('personal')}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeSubTab === 'personal' ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/20' : 'text-dim hover:bg-surface'}`}
+            >
+              <UserIcon className="w-5 h-5" />
+              <span className="font-medium">Thông tin cá nhân</span>
+            </button>
+            <button 
+              onClick={() => setActiveSubTab('security')}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeSubTab === 'security' ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/20' : 'text-dim hover:bg-surface'}`}
+            >
+              <Shield className="w-5 h-5" />
+              <span className="font-medium">Bảo mật</span>
+            </button>
+            <button 
+              onClick={() => setActiveSubTab('privacy')}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeSubTab === 'privacy' ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/20' : 'text-dim hover:bg-surface'}`}
+            >
+              <Eye className="w-5 h-5" />
+              <span className="font-medium">Quyền riêng tư</span>
+            </button>
+            <button 
+              onClick={() => setActiveSubTab('settings')}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeSubTab === 'settings' ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/20' : 'text-dim hover:bg-surface'}`}
+            >
+              <Settings className="w-5 h-5" />
+              <span className="font-medium">Cài đặt</span>
+            </button>
+          </div>
+
+          {/* Content Area */}
+          <div className="flex-1 w-full min-h-[400px]">
+            {activeSubTab === 'personal' && (
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                <div className="flex items-center gap-6 p-6 bg-neutral-900/50 rounded-2xl border border-neutral-800">
+                  <img src={profile?.photoURL || ''} alt="" className="w-20 h-20 rounded-full border-2 border-blue-500/20" />
+                  <div>
+                    <h2 className="text-2xl font-bold text-main">{profile?.displayName}</h2>
+                    <p className="text-dim">{profile?.email}</p>
+                    <span className="inline-block mt-2 px-3 py-1 bg-blue-500/10 text-blue-400 text-[10px] font-bold uppercase tracking-wider rounded-full border border-blue-500/20">
+                      {profile?.role === 'admin' ? 'Quản trị viên' : 'Thành viên'}
+                    </span>
+                  </div>
+                </div>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="p-4 bg-surface/30 rounded-xl border border-main">
+                    <p className="text-[10px] text-dim uppercase font-bold mb-1">Mã NumberID</p>
+                    <p className="text-lg font-mono text-main">{profile?.numberID}</p>
+                    <p className="text-[10px] text-dim italic mt-1">* Chỉ Admin mới có quyền thay đổi mã này</p>
+                  </div>
+                  <div className="p-4 bg-surface/30 rounded-xl border border-main">
+                    <p className="text-[10px] text-dim uppercase font-bold mb-1">Mã Truy cập (Key)</p>
+                    <p className="text-lg font-mono text-blue-400">{profile?.accessKey}</p>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {activeSubTab === 'security' && (
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                <div className="space-y-4">
+                  <h3 className="text-lg font-bold text-main">Xác thực 2 lớp</h3>
+                  <div className="p-6 bg-surface/50 rounded-2xl border border-main space-y-4">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-dim">Trạng thái</label>
+                      <div className="flex items-center gap-2">
+                        <div className={`w-3 h-3 rounded-full ${profile?.secondaryPassword ? 'bg-green-500' : 'bg-red-500'}`} />
+                        <span className="text-sm font-bold text-main">
+                          {profile?.secondaryPassword ? 'Đã cài đặt' : 'Chưa cài đặt'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {profile?.secondaryPassword && (
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-dim">Mật khẩu cũ</label>
+                        <input 
+                          type="password"
+                          value={oldPass2}
+                          onChange={(e) => setOldPass2(e.target.value)}
+                          placeholder="Nhập mật khẩu cũ"
+                          className="w-full input-field"
+                        />
+                      </div>
+                    )}
+
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-dim">Mật khẩu mới</label>
+                      <input 
+                        type="password"
+                        value={pass2}
+                        onChange={(e) => setPass2(e.target.value)}
+                        placeholder="Nhập mật khẩu mới"
+                        className="w-full input-field"
+                      />
+                    </div>
+                    
+                    <button 
+                      onClick={handleSaveSecurity}
+                      disabled={isSaving}
+                      className="w-full py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-xl font-bold transition-all disabled:opacity-50"
+                    >
+                      {isSaving ? 'Đang lưu...' : (profile?.secondaryPassword ? 'Đổi mật khẩu' : 'Cài đặt mật khẩu')}
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {activeSubTab === 'privacy' && (
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                <div className="p-6 bg-surface/50 rounded-2xl border border-main space-y-6">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="font-medium text-main">Chia sẻ vị trí</p>
+                      <p className="text-xs text-dim">Bắt buộc để truy cập trang web</p>
+                    </div>
+                    <button 
+                      disabled
+                      className="w-12 h-6 rounded-full relative bg-blue-500 opacity-50 cursor-not-allowed"
+                    >
+                      <div className="absolute top-1 right-1 w-4 h-4 bg-white rounded-full" />
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="font-medium text-main">Nhật ký hoạt động</p>
+                      <p className="text-xs text-dim">Bắt buộc để bảo mật tài khoản</p>
+                    </div>
+                    <button 
+                      disabled
+                      className="w-12 h-6 rounded-full relative bg-blue-500 opacity-50 cursor-not-allowed"
+                    >
+                      <div className="absolute top-1 right-1 w-4 h-4 bg-white rounded-full" />
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {activeSubTab === 'settings' && (
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                <div className="space-y-4">
+                  <h3 className="text-lg font-bold text-main">Giao diện</h3>
+                  <div className="grid grid-cols-3 gap-4">
+                    <button 
+                      onClick={() => setTheme('light')}
+                      className={`p-4 rounded-2xl border transition-all flex flex-col items-center gap-2 ${theme === 'light' ? 'bg-blue-500/10 border-blue-500 text-blue-500' : 'bg-surface/50 border-main text-dim hover:border-blue-500/50'}`}
+                    >
+                      <Sun className="w-6 h-6" />
+                      <span className="text-xs font-bold">Sáng</span>
+                    </button>
+                    <button 
+                      onClick={() => setTheme('dark')}
+                      className={`p-4 rounded-2xl border transition-all flex flex-col items-center gap-2 ${theme === 'dark' ? 'bg-blue-500/10 border-blue-500 text-blue-500' : 'bg-surface/50 border-main text-dim hover:border-blue-500/50'}`}
+                    >
+                      <Moon className="w-6 h-6" />
+                      <span className="text-xs font-bold">Tối</span>
+                    </button>
+                    <button 
+                      onClick={() => setTheme('system')}
+                      className={`p-4 rounded-2xl border transition-all flex flex-col items-center gap-2 ${theme === 'system' ? 'bg-blue-500/10 border-blue-500 text-blue-500' : 'bg-surface/50 border-main text-dim hover:border-blue-500/50'}`}
+                    >
+                      <Monitor className="w-6 h-6" />
+                      <span className="text-xs font-bold">Hệ thống</span>
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AdminContactInfo({ settings }: { settings: SystemSettings | null }) {
   if (!settings?.contactMethods || settings.contactMethods.length === 0) {
     return null;
@@ -2574,7 +3146,7 @@ function AdminContactInfo({ settings }: { settings: SystemSettings | null }) {
 
   return (
     <div className="mt-6 flex flex-col items-center gap-3 w-full">
-      <p className="text-[10px] font-bold text-neutral-600 uppercase tracking-[0.2em]">Liên hệ Admin</p>
+      <p className="text-[10px] font-bold text-dim uppercase tracking-[0.2em]">Liên hệ Admin</p>
       <div className="flex items-center justify-center gap-3 flex-wrap max-w-full px-2">
         {settings.contactMethods.map((method) => (
           <a 
@@ -2583,14 +3155,14 @@ function AdminContactInfo({ settings }: { settings: SystemSettings | null }) {
             target="_blank"
             rel="noreferrer"
             title={method.label}
-            className="w-9 h-9 bg-neutral-900/50 hover:bg-blue-500/10 rounded-full border border-neutral-800 hover:border-blue-500/30 flex items-center justify-center transition-all group shrink-0"
+            className="w-9 h-9 bg-surface/50 hover:bg-blue-500/10 rounded-full border border-main hover:border-blue-500/30 flex items-center justify-center transition-all group shrink-0"
           >
-            {method.type === 'phone' && <Phone className="w-4 h-4 text-neutral-500 group-hover:text-blue-400" />}
-            {method.type === 'email' && <Mail className="w-4 h-4 text-neutral-500 group-hover:text-blue-400" />}
-            {method.type === 'facebook' && <Facebook className="w-4 h-4 text-neutral-500 group-hover:text-blue-400" />}
-            {method.type === 'telegram' && <Send className="w-4 h-4 text-neutral-500 group-hover:text-blue-400" />}
-            {method.type === 'zalo' && <MessageCircle className="w-4 h-4 text-neutral-500 group-hover:text-blue-400" />}
-            {method.type === 'other' && <Link className="w-4 h-4 text-neutral-500 group-hover:text-blue-400" />}
+            {method.type === 'phone' && <Phone className="w-4 h-4 text-dim group-hover:text-blue-400" />}
+            {method.type === 'email' && <Mail className="w-4 h-4 text-dim group-hover:text-blue-400" />}
+            {method.type === 'facebook' && <Facebook className="w-4 h-4 text-dim group-hover:text-blue-400" />}
+            {method.type === 'telegram' && <Send className="w-4 h-4 text-dim group-hover:text-blue-400" />}
+            {method.type === 'zalo' && <MessageCircle className="w-4 h-4 text-dim group-hover:text-blue-400" />}
+            {method.type === 'other' && <Link className="w-4 h-4 text-dim group-hover:text-blue-400" />}
           </a>
         ))}
       </div>
@@ -2605,7 +3177,7 @@ function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode, labe
       className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${
         active 
           ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' 
-          : 'text-neutral-400 hover:bg-neutral-800 hover:text-white'
+          : 'text-dim hover:bg-surface hover:text-main'
       }`}
     >
       {icon}
@@ -2640,25 +3212,25 @@ const PasswordRow: React.FC<{
   };
 
   return (
-    <tr className={`text-sm hover:bg-neutral-900/30 transition-colors group ${isPinnedByUser ? 'bg-blue-900/10' : ''}`}>
+    <tr className={`text-sm hover:bg-surface/30 transition-colors group ${isPinnedByUser ? 'bg-blue-900/10' : ''}`}>
       <td className="px-6 py-4 min-w-[200px]">
         <div className="flex items-center gap-3">
           <button 
             onClick={onTogglePin}
-            className={`p-1.5 rounded-lg transition-all ${isPinnedByUser ? 'text-yellow-500 hover:bg-yellow-500/10' : 'text-neutral-600 hover:text-yellow-500 hover:bg-yellow-500/10 opacity-0 group-hover:opacity-100'}`}
+            className={`p-1.5 rounded-lg transition-all ${isPinnedByUser ? 'text-yellow-500 hover:bg-yellow-500/10' : 'text-dim hover:text-yellow-500 hover:bg-yellow-500/10 opacity-0 group-hover:opacity-100'}`}
           >
             <Star className="w-4 h-4" fill={isPinnedByUser ? "currentColor" : "none"} />
           </button>
           <img 
             src={favicon} 
-            className="w-8 h-8 rounded-lg bg-neutral-800 p-1.5" 
+            className="w-8 h-8 rounded-lg bg-surface p-1.5 border border-main" 
             alt="icon" 
             referrerPolicy="no-referrer"
             onError={(e) => (e.currentTarget.src = 'https://www.google.com/favicon.ico')}
           />
           <div className="flex flex-col">
-            <span className="font-medium truncate max-w-[150px]">{entry.website}</span>
-            <a href={entry.website} target="_blank" rel="noreferrer" className="text-[10px] text-neutral-500 hover:text-blue-400 flex items-center gap-1">
+            <span className="font-medium truncate max-w-[150px] text-main">{entry.website}</span>
+            <a href={entry.website} target="_blank" rel="noreferrer" className="text-[10px] text-dim hover:text-blue-400 flex items-center gap-1">
               Truy cập <ExternalLink className="w-2 h-2" />
             </a>
           </div>
@@ -2666,13 +3238,13 @@ const PasswordRow: React.FC<{
       </td>
       <td className="px-6 py-4 min-w-[150px]">
         <div className="flex items-center gap-2">
-          <span className="text-neutral-300 truncate max-w-[120px]">{entry.username}</span>
+          <span className="text-dim truncate max-w-[120px]">{entry.username}</span>
           <button 
             onClick={() => {
               navigator.clipboard.writeText(entry.username);
               toast.success('Đã sao chép tên đăng nhập');
             }}
-            className="p-1 text-neutral-600 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity"
+            className="p-1 text-dim hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity"
           >
             <Copy className="w-3.5 h-3.5" />
           </button>
@@ -2680,7 +3252,7 @@ const PasswordRow: React.FC<{
       </td>
       <td className="px-6 py-4 min-w-[150px]">
         <div className="flex items-center gap-2 font-mono">
-          <span className="text-neutral-400 select-none">
+          <span className="text-dim select-none">
             {showPass ? decrypt(entry.password) : '••••••••'}
           </span>
           <button 
@@ -2689,7 +3261,7 @@ const PasswordRow: React.FC<{
             onMouseLeave={handleShowPassEnd}
             onTouchStart={handleShowPassStart}
             onTouchEnd={handleShowPassEnd}
-            className="p-1 text-neutral-600 hover:text-white active:text-blue-400 cursor-pointer"
+            className="p-1 text-dim hover:text-main active:text-blue-400 cursor-pointer"
             title="Chạm và giữ để xem"
           >
             {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -2697,7 +3269,7 @@ const PasswordRow: React.FC<{
         </div>
       </td>
       <td className="px-6 py-4 min-w-[150px]">
-        <span className="text-neutral-500 text-xs italic truncate max-w-[150px] block">
+        <span className="text-dim text-xs italic truncate max-w-[150px] block">
           {entry.notes || 'Không có ghi chú'}
         </span>
       </td>
@@ -2707,7 +3279,7 @@ const PasswordRow: React.FC<{
             <>
               <button 
                 onClick={onCopy}
-                className="flex items-center gap-2 bg-neutral-800 hover:bg-blue-600 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+                className="flex items-center gap-2 bg-surface hover:bg-blue-600 px-3 py-1.5 rounded-lg text-xs font-medium transition-all border border-main text-main hover:text-white"
               >
                 <Copy className="w-3.5 h-3.5" />
                 Sao chép
@@ -2716,13 +3288,13 @@ const PasswordRow: React.FC<{
                 <>
                   <button 
                     onClick={onEdit}
-                    className="p-2 text-neutral-600 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all"
+                    className="p-2 text-dim hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all"
                   >
                     <Settings className="w-4 h-4" />
                   </button>
                   <button 
                     onClick={onDelete}
-                    className="p-2 text-neutral-600 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
+                    className="p-2 text-dim hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
@@ -2735,7 +3307,7 @@ const PasswordRow: React.FC<{
                 <>
                   <button 
                     onClick={onRestore}
-                    className="flex items-center gap-2 bg-neutral-800 hover:bg-green-600 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+                    className="flex items-center gap-2 bg-surface hover:bg-green-600 px-3 py-1.5 rounded-lg text-xs font-medium transition-all text-main border border-main"
                   >
                     <ArchiveRestore className="w-3.5 h-3.5" />
                     Khôi phục
@@ -2757,20 +3329,47 @@ const PasswordRow: React.FC<{
   );
 }
 
-const UserRow: React.FC<{ user: UserProfile, onUpdate: (uid: string, disabled: boolean, newAccessKey?: string) => void, onDelete: (uid: string) => void }> = ({ user, onUpdate, onDelete }) => {
+const UserRow: React.FC<{ 
+  user: UserProfile, 
+  onUpdate: (uid: string, disabled: boolean, newAccessKey?: string) => void, 
+  onDelete: (uid: string) => void,
+  onManagePermissions?: (user: UserProfile) => void,
+  isSuperAdmin?: boolean
+}> = ({ user, onUpdate, onDelete, onManagePermissions, isSuperAdmin }) => {
   const [disabled, setDisabled] = useState(!!user.isDisabled);
   const [isEditingKey, setIsEditingKey] = useState(false);
   const [newKey, setNewKey] = useState(user.accessKey || '');
   const status = user.isDisabled ? 'locked' : (user.status || 'active');
 
+  const handleToggleAdmin = async () => {
+    if (!isSuperAdmin) return;
+    try {
+      const newRole = user.role === 'admin' ? 'user' : 'admin';
+      await updateDoc(doc(db, 'users', user.uid), {
+        role: newRole,
+        permissions: newRole === 'admin' ? {
+          manageUsers: false,
+          managePasswords: false,
+          manageTabs: false,
+          viewLogs: false,
+          manageSettings: false,
+          manageUserTabs: false
+        } : null
+      });
+      toast.success(`Đã ${newRole === 'admin' ? 'bổ nhiệm' : 'gỡ'} quyền Admin`);
+    } catch (error) {
+      toast.error('Lỗi khi thay đổi vai trò');
+    }
+  };
+
   return (
-    <tr className="text-sm hover:bg-neutral-900/30 transition-colors">
+    <tr className="text-sm hover:bg-surface/30 transition-colors">
       <td className="px-6 py-4 min-w-[250px]">
         <div className="flex items-center gap-3">
-          <img src={user.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(user.displayName || 'User')}`} className="w-10 h-10 rounded-full border border-neutral-800" alt="" />
+          <img src={user.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(user.displayName || 'User')}`} className="w-10 h-10 rounded-full border border-main" alt="" />
           <div>
             <div className="flex items-center gap-2">
-              <p className="font-medium">{user.displayName || 'Người dùng ẩn danh'}</p>
+              <p className="font-medium text-main">{user.displayName || 'Người dùng ẩn danh'}</p>
               {user.latitude && user.longitude && (
                 <a 
                   href={`https://www.google.com/maps?q=${user.latitude},${user.longitude}`} 
@@ -2783,110 +3382,217 @@ const UserRow: React.FC<{ user: UserProfile, onUpdate: (uid: string, disabled: b
                 </a>
               )}
             </div>
-            <p className="text-[10px] text-neutral-500">{user.email}</p>
-            <p className="text-[10px] text-neutral-600 font-mono">IP: {user.lastIp || 'N/A'}</p>
-          </div>
-        </div>
-      </td>
-      <td className="px-6 py-4 min-w-[120px]">
-        <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase ${
-          user.role === 'admin' ? 'bg-blue-500/10 text-blue-400' : 'bg-neutral-500/10 text-neutral-400'
-        }`}>
-          {user.role === 'admin' ? 'Quản trị viên' : 'Người dùng'}
-        </span>
-      </td>
-      <td className="px-6 py-4 min-w-[150px]">
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-2 text-[10px] text-neutral-500">
-            <Clock className="w-3 h-3" />
-            <span>Lần đầu: {user.firstLogin ? format(parseISO(user.firstLogin), 'HH:mm dd/MM') : 'N/A'}</span>
-          </div>
-          <div className="flex items-center gap-2 text-[10px] text-neutral-400">
-            <History className="w-3 h-3" />
-            <span>Gần nhất: {user.lastLogin ? format(parseISO(user.lastLogin), 'HH:mm dd/MM') : 'N/A'}</span>
+            <p className="text-[10px] text-dim">{user.email}</p>
+            <p className="text-[10px] text-dim/60 font-mono">IP: {user.lastIp || 'N/A'}</p>
           </div>
         </div>
       </td>
       <td className="px-6 py-4 min-w-[120px]">
         <div className="flex flex-col gap-2">
-          <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase text-center ${
-            status === 'active' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+          <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase w-fit ${
+            user.role === 'admin' ? 'bg-blue-500/10 text-blue-400' : 'bg-dim/10 text-dim'
           }`}>
-            {status === 'active' ? 'Đang hoạt động' : 'Đã bị khóa'}
+            {user.role === 'admin' ? (user.isSuperAdmin ? 'Admin Tổng' : 'Admin Cấp dưới') : 'Người dùng'}
           </span>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input 
-              type="checkbox" 
-              checked={disabled} 
-              onChange={(e) => setDisabled(e.target.checked)}
-              className="w-3 h-3 accent-red-500"
-            />
-            <span className="text-[10px] text-neutral-500">Vô hiệu hóa</span>
-          </label>
+          {isSuperAdmin && !user.isSuperAdmin && (
+            <button 
+              onClick={handleToggleAdmin}
+              className="text-[10px] text-blue-500 hover:underline text-left"
+            >
+              {user.role === 'admin' ? 'Gỡ quyền Admin' : 'Bổ nhiệm Admin'}
+            </button>
+          )}
         </div>
       </td>
       <td className="px-6 py-4 min-w-[150px]">
         <div className="flex flex-col gap-1">
-          <p className="text-[10px] text-neutral-500 mb-1">Mã truy cập:</p>
-          {isEditingKey ? (
-            <div className="flex items-center gap-2">
-              <input 
-                type="text" 
-                value={newKey} 
-                onChange={(e) => setNewKey(e.target.value)}
-                className="bg-neutral-900 border border-neutral-800 px-2 py-1 rounded font-mono text-[10px] text-white outline-none w-24"
-              />
-              <button onClick={() => {
-                if (newKey.length !== 8) {
-                  toast.error('Mã truy cập phải có đúng 8 ký tự');
-                  return;
-                }
-                onUpdate(user.uid, disabled, newKey);
-                setIsEditingKey(false);
-              }} className="text-green-400 hover:text-green-300">
-                <CheckCircle2 className="w-4 h-4" />
-              </button>
-              <button onClick={() => {
-                setNewKey(user.accessKey || '');
-                setIsEditingKey(false);
-              }} className="text-red-400 hover:text-red-300">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 bg-neutral-900 border border-neutral-800 px-2 py-1 rounded font-mono text-[10px] text-blue-400">
-              {user.accessKey || 'N/A'}
-              <button onClick={() => {
-                if (user.accessKey) {
-                  navigator.clipboard.writeText(user.accessKey);
-                  toast.success('Đã sao chép mã truy cập');
-                }
-              }} className="hover:text-white">
-                <Copy className="w-3 h-3" />
-              </button>
-              <button onClick={() => setIsEditingKey(true)} className="hover:text-white ml-auto">
-                <Settings className="w-3 h-3" />
-              </button>
-            </div>
-          )}
+          <div className="flex items-center gap-2 text-[10px] text-neutral-500">
+            <Key className="w-3 h-3" />
+            <span>Access Key</span>
+          </div>
+          <div className="flex items-center gap-2">
+            {isEditingKey ? (
+              <div className="flex items-center gap-1">
+                <input 
+                  type="text" 
+                  value={newKey} 
+                  onChange={(e) => setNewKey(e.target.value)}
+                  className="bg-surface border border-main rounded px-2 py-1 text-xs w-24 text-main"
+                />
+                <button 
+                  onClick={() => {
+                    onUpdate(user.uid, disabled, newKey);
+                    setIsEditingKey(false);
+                  }}
+                  className="p-1 text-green-500 hover:bg-green-500/10 rounded"
+                >
+                  <Check className="w-3 h-3" />
+                </button>
+              </div>
+            ) : (
+              <>
+                <span className="font-mono text-xs text-neutral-300">{user.accessKey || 'N/A'}</span>
+                <button 
+                  onClick={() => setIsEditingKey(true)}
+                  className="p-1 text-neutral-500 hover:text-blue-400"
+                >
+                  <Edit2 className="w-3 h-3" />
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </td>
-      <td className="px-6 py-4 text-right min-w-[120px]">
+      <td className="px-6 py-4 min-w-[120px]">
+        <div className={`flex items-center gap-1.5 ${
+          status === 'active' ? 'text-green-500' : 
+          status === 'locked' ? 'text-red-500' : 'text-neutral-500'
+        }`}>
+          <div className={`w-1.5 h-1.5 rounded-full ${
+            status === 'active' ? 'bg-green-500' : 
+            status === 'locked' ? 'bg-red-500' : 'bg-neutral-500'
+          }`} />
+          <span className="text-[10px] font-bold uppercase">
+            {status === 'active' ? 'Hoạt động' : 
+             status === 'locked' ? 'Đã khóa' : 'Ngoại tuyến'}
+          </span>
+        </div>
+      </td>
+      <td className="px-6 py-4 min-w-[150px]">
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2 text-[10px] text-dim">
+            <Lock className="w-3 h-3" />
+            <span>MK Cấp 2</span>
+          </div>
+          <span className="text-xs font-medium text-main">
+            {user.secondaryPassword ? '••••••••' : 'Chưa cài đặt'}
+          </span>
+        </div>
+      </td>
+      <td className="px-6 py-4 text-right min-w-[150px]">
         <div className="flex items-center justify-end gap-2">
+          {user.role === 'admin' && !user.isSuperAdmin && isSuperAdmin && (
+            <button 
+              onClick={() => onManagePermissions?.(user)}
+              className="p-2 text-dim hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all"
+              title="Quản lý quyền hạn"
+            >
+              <ShieldCheck className="w-4 h-4" />
+            </button>
+          )}
           <button 
-            onClick={() => onUpdate(user.uid, disabled)}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+            onClick={() => {
+              const newDisabled = !disabled;
+              setDisabled(newDisabled);
+              onUpdate(user.uid, newDisabled);
+            }}
+            className={`p-2 rounded-lg transition-all ${
+              disabled ? 'text-red-500 bg-red-500/10 hover:bg-red-500/20' : 'text-dim hover:text-red-400 hover:bg-red-400/10'
+            }`}
+            title={disabled ? "Mở khóa tài khoản" : "Khóa tài khoản"}
           >
-            Lưu
+            {disabled ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
           </button>
           <button 
             onClick={() => onDelete(user.uid)}
-            className="p-2 text-neutral-600 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
+            className="p-2 text-dim hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
+            title="Xóa tài khoản"
           >
             <Trash2 className="w-4 h-4" />
           </button>
         </div>
       </td>
     </tr>
+  );
+}
+
+function PermissionEditor({ user, onClose }: { user: UserProfile, onClose: () => void }) {
+  const [permissions, setPermissions] = useState<AdminPermissions>(user.permissions || {
+    manageUsers: false,
+    managePasswords: false,
+    manageTabs: false,
+    viewLogs: false,
+    manageSettings: false,
+    manageUserTabs: false
+  });
+  const [isSaving, setIsSaving] = useState(false);
+
+  const handleToggle = (key: keyof AdminPermissions) => {
+    setPermissions(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await updateDoc(doc(db, 'users', user.uid), { permissions });
+      toast.success('Đã cập nhật quyền hạn');
+      onClose();
+    } catch (error) {
+      toast.error('Lỗi khi lưu quyền hạn');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const permissionLabels: Record<keyof AdminPermissions, string> = {
+    manageUsers: 'Quản lý người dùng',
+    managePasswords: 'Quản lý mật khẩu',
+    manageTabs: 'Quản lý Tab hệ thống',
+    viewLogs: 'Xem nhật ký hệ thống',
+    manageSettings: 'Quản lý cài đặt hệ thống',
+    manageUserTabs: 'Quản lý Tab người dùng'
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.9 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="glass w-full max-w-md rounded-3xl overflow-hidden shadow-2xl border border-blue-500/30"
+      >
+        <div className="p-6 border-b border-main flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <ShieldCheck className="w-6 h-6 text-blue-500" />
+            <div>
+              <h3 className="text-xl font-bold text-main">Quyền hạn Admin</h3>
+              <p className="text-xs text-dim">{user.displayName}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-surface rounded-full transition-colors">
+            <X className="w-5 h-5 text-dim" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          {Object.entries(permissionLabels).map(([key, label]) => (
+            <div key={key} className="flex items-center justify-between p-4 bg-surface/50 rounded-2xl border border-main">
+              <span className="text-sm font-medium text-main">{label}</span>
+              <button 
+                onClick={() => handleToggle(key as keyof AdminPermissions)}
+                className={`w-12 h-6 rounded-full relative transition-colors ${permissions[key as keyof AdminPermissions] ? 'bg-blue-500' : 'bg-dim/30'}`}
+              >
+                <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${permissions[key as keyof AdminPermissions] ? 'right-1' : 'left-1'}`} />
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <div className="p-6 bg-surface/50 flex gap-3">
+          <button 
+            onClick={onClose}
+            className="flex-1 py-3 bg-surface hover:bg-surface/80 text-main rounded-xl font-bold transition-all border border-main"
+          >
+            Hủy
+          </button>
+          <button 
+            onClick={handleSave}
+            disabled={isSaving}
+            className="flex-1 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-xl font-bold transition-all disabled:opacity-50"
+          >
+            {isSaving ? 'Đang lưu...' : 'Lưu quyền hạn'}
+          </button>
+        </div>
+      </motion.div>
+    </div>
   );
 }

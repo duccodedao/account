@@ -1,9 +1,20 @@
+export interface AdminPermissions {
+  manageUsers: boolean;
+  managePasswords: boolean;
+  manageTabs: boolean;
+  viewLogs: boolean;
+  manageSettings: boolean;
+  manageUserTabs: boolean;
+}
+
 export interface UserProfile {
   uid: string;
   email: string;
   displayName: string;
   photoURL: string;
   role: 'admin' | 'user';
+  isSuperAdmin?: boolean;
+  permissions?: AdminPermissions;
   startTime: string; // ISO string
   endTime: string;   // ISO string
   isLocked: boolean;
@@ -16,7 +27,12 @@ export interface UserProfile {
   firstLogin?: string;
   lastLogin?: string;
   accessKey?: string;
+  numberID?: string;
+  secondaryPassword?: string;
+  isFirstLogin?: boolean;
   status?: 'active' | 'locked';
+  shareLocation?: boolean;
+  logActivity?: boolean;
 }
 
 export interface PasswordEntry {
@@ -60,7 +76,7 @@ export interface ContactMethod {
 }
 
 export interface SystemSettings {
-  otp: string;
+  numberID: string;
   passwordLevel2: string;
   specialPassword?: string;
   specialPasswordHint?: string;

@@ -26,7 +26,8 @@ export interface PasswordEntry {
   password: string; // Encrypted
   notes?: string;
   tabId?: string; // 'general' or specific tab ID
-  isPinned?: boolean;
+  isPinned?: boolean; // Legacy
+  pinnedBy?: string[]; // Array of user IDs who pinned this
   isDeleted?: boolean;
   deletedAt?: string;
   createdAt: string;
@@ -38,6 +39,7 @@ export interface PasswordTab {
   name: string;
   password: string; // Encrypted
   createdAt: string;
+  isHidden?: boolean;
 }
 
 export interface ActivityLog {
@@ -65,4 +67,12 @@ export interface SystemSettings {
   isMaintenance: boolean;
   blockedIps?: string[];
   contactMethods?: ContactMethod[];
+}
+
+export interface UserTab {
+  id: string;
+  name: string;
+  ownerId: string;
+  password: string; // Encrypted
+  createdAt: string;
 }

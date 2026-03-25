@@ -29,7 +29,8 @@ import {
   ActivityLog, 
   SystemSettings,
   ContactMethod,
-  PasswordTab
+  PasswordTab,
+  UserTab
 } from './types';
 import { encrypt, decrypt } from './lib/crypto';
 import { Toaster, toast } from 'sonner';
@@ -66,7 +67,8 @@ import {
   FolderLock,
   FolderOpen,
   Star,
-  ArchiveRestore
+  ArchiveRestore,
+  FolderKey
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { format, isAfter, isBefore, parseISO, isValid } from 'date-fns';
@@ -127,14 +129,17 @@ export default function App() {
   const [isSecondaryAuthPassed, setIsSecondaryAuthPassed] = useState(false);
   
   // App State
-  const [activeTab, setActiveTab] = useState<'passwords' | 'users' | 'logs' | 'settings'>('passwords');
+  const [activeTab, setActiveTab] = useState<'passwords' | 'users' | 'logs' | 'settings' | 'userTabs'>('passwords');
   const [passwords, setPasswords] = useState<PasswordEntry[]>([]);
   const [passwordTabs, setPasswordTabs] = useState<PasswordTab[]>([]);
+  const [userTabs, setUserTabs] = useState<UserTab[]>([]);
   const [activePasswordTab, setActivePasswordTab] = useState<string>('general');
   const [unlockedTabs, setUnlockedTabs] = useState<string[]>([]);
   const [tabPasswordInput, setTabPasswordInput] = useState('');
   const [isTabUnlockModalOpen, setIsTabUnlockModalOpen] = useState(false);
-  const [tabToUnlock, setTabToUnlock] = useState<PasswordTab | null>(null);
+  const [isCreateUserTabModalOpen, setIsCreateUserTabModalOpen] = useState(false);
+  const [editingUserTab, setEditingUserTab] = useState<UserTab | null>(null);
+  const [tabToUnlock, setTabToUnlock] = useState<PasswordTab | UserTab | null>(null);
   
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
@@ -145,16 +150,29 @@ export default function App() {
   const [userIp, setUserIp] = useState<string>('');
   const [editingPassword, setEditingPassword] = useState<PasswordEntry | null>(null);
   
+  // Filtered Passwords based on user role
+  const filteredPasswords = useMemo(() => {
+    if (profile?.role === 'admin') return passwords;
+    const myTabId = userTabs.find(t => t.ownerId === user?.uid)?.id;
+    return passwords.filter(p => 
+      !p.tabId || 
+      p.tabId === 'general' || 
+      passwordTabs.some(t => t.id === p.tabId) || 
+      p.tabId === myTabId
+    );
+  }, [passwords, profile, userTabs, passwordTabs, user]);
+
   // Statistics
   const stats = useMemo(() => {
     return {
-      totalPasswords: passwords.length,
+      totalGeneralPasswords: filteredPasswords.filter(p => p.tabId === 'general' || !p.tabId).length,
+      totalTabPasswords: filteredPasswords.filter(p => p.tabId && p.tabId !== 'general').length,
       totalUsers: users.length,
       totalLogs: logs.length,
       activeUsers: users.filter(u => !u.isDisabled && (!u.endTime || new Date(u.endTime) > new Date())).length,
       blockedIpsCount: settings?.blockedIps?.length || 0
     };
-  }, [passwords, users, logs, settings]);
+  }, [filteredPasswords, users, logs, settings]);
   
   // Secondary Auth Inputs
   const [otpInput, setOtpInput] = useState('');
@@ -164,6 +182,7 @@ export default function App() {
   
   // Search & Filter
   const [searchTerm, setSearchTerm] = useState('');
+  const [userTabSearchTerm, setUserTabSearchTerm] = useState('');
   const [userSearchTerm, setUserSearchTerm] = useState('');
   const [logSearchTerm, setLogSearchTerm] = useState('');
   const [logActionFilter, setLogActionFilter] = useState<string>('all');
@@ -171,6 +190,9 @@ export default function App() {
   const [isDeletingLogs, setIsDeletingLogs] = useState(false);
   const [showSpecialPassHint, setShowSpecialPassHint] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
+  const [secretAdminClicks, setSecretAdminClicks] = useState(0);
+  const [showSecretLogin, setShowSecretLogin] = useState(false);
+  const [isNotFound, setIsNotFound] = useState(false);
   
   // Loading States
   const [isLoading, setIsLoading] = useState(true);
@@ -196,6 +218,11 @@ export default function App() {
 
   // --- WINDOW RESIZE HANDLER ---
   useEffect(() => {
+    // Check for 404
+    if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
+      setIsNotFound(true);
+    }
+
     const handleResize = () => {
       const mobile = window.innerWidth < 1024;
       setIsMobile(mobile);
@@ -354,6 +381,16 @@ export default function App() {
       console.error("PasswordTabs snapshot error:", error);
     });
 
+    const qUserTabs = profile?.role === 'admin'
+      ? query(collection(db, 'userTabs'), orderBy('createdAt', 'asc'))
+      : query(collection(db, 'userTabs'), where('ownerId', '==', user?.uid || ''));
+      
+    const unsubUserTabs = onSnapshot(qUserTabs, (snapshot) => {
+      setUserTabs(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as UserTab)));
+    }, (error) => {
+      console.error("UserTabs snapshot error:", error);
+    });
+
     let unsubUsers = () => {};
     let unsubLogs = () => {};
 
@@ -372,10 +409,11 @@ export default function App() {
     return () => {
       unsubPasswords();
       unsubTabs();
+      unsubUserTabs();
       unsubUsers();
       unsubLogs();
     };
-  }, [isSecondaryAuthPassed, profile]);
+  }, [isSecondaryAuthPassed, profile, user?.uid]);
 
   // --- ACCESS CHECKER ---
   useEffect(() => {
@@ -462,6 +500,9 @@ export default function App() {
     if (user) {
       await logActivity('logout', 'User logged out');
     }
+    if (profile?.role === 'admin') {
+      localStorage.removeItem('admin_session_passed');
+    }
     await signOut(auth);
     setIsSecondaryAuthPassed(false);
     setProfile(null);
@@ -469,8 +510,9 @@ export default function App() {
   };
 
   useEffect(() => {
-    // Removed silent logout for disabled users as per request
-    // They will now see a persistent "Account Locked" screen
+    if (profile?.role === 'admin' && localStorage.getItem('admin_session_passed') === 'true') {
+      setIsSecondaryAuthPassed(true);
+    }
   }, [profile]);
 
   const handleSecondaryAuth = async () => {
@@ -504,6 +546,10 @@ export default function App() {
         localStorage.setItem('rememberedAccessKey', accessKeyInput);
       } else {
         localStorage.removeItem('rememberedAccessKey');
+      }
+
+      if (profile.role === 'admin') {
+        localStorage.setItem('admin_session_passed', 'true');
       }
 
       setIsSecondaryAuthPassed(true);
@@ -587,22 +633,28 @@ export default function App() {
     }
   };
 
-  const handleTogglePinPassword = async (id: string, currentPinStatus: boolean) => {
+  const handleTogglePinPassword = async (id: string, currentPinnedBy: string[]) => {
+    if (!user) return;
     try {
+      const isCurrentlyPinned = currentPinnedBy.includes(user.uid);
+      const newPinnedBy = isCurrentlyPinned 
+        ? currentPinnedBy.filter(uid => uid !== user.uid)
+        : [...currentPinnedBy, user.uid];
+
       await updateDoc(doc(db, 'passwords', id), {
-        isPinned: !currentPinStatus
+        pinnedBy: newPinnedBy
       });
-      toast.success(currentPinStatus ? 'Đã bỏ ghim mật khẩu' : 'Đã ghim mật khẩu');
+      toast.success(isCurrentlyPinned ? 'Đã bỏ ghim mật khẩu' : 'Đã ghim mật khẩu');
     } catch (error) {
       toast.error('Thao tác thất bại');
     }
   };
 
   const handleExportExcel = () => {
-    const filteredPasswords = passwords.filter(p => {
+    const filteredPasswordsForExport = filteredPasswords.filter(p => {
       return activePasswordTab === 'general' ? (!p.tabId || p.tabId === 'general') : p.tabId === activePasswordTab;
     });
-    const dataToExport = filteredPasswords.map(p => ({
+    const dataToExport = filteredPasswordsForExport.map(p => ({
       Website: p.website,
       Username: p.username,
       Password: decrypt(p.password),
@@ -720,15 +772,30 @@ export default function App() {
     setDuplicateEntries([]);
   };
 
-  const handleUpdateUserAccess = async (uid: string, disabled: boolean) => {
+  const handleUpdateUserAccess = async (uid: string, disabled: boolean, newAccessKey?: string) => {
     try {
+      if (newAccessKey) {
+        // Check for duplicates
+        const duplicateUser = users.find(u => u.uid !== uid && u.accessKey === newAccessKey);
+        if (duplicateUser) {
+          toast.error('Mã truy cập này đã được sử dụng bởi người dùng khác!');
+          return;
+        }
+      }
+
       const status = disabled ? 'locked' : 'active';
-      await updateDoc(doc(db, 'users', uid), {
+      const updateData: any = {
         status,
         isDisabled: disabled,
         isLocked: disabled
-      });
-      toast.success('Cập nhật trạng thái người dùng thành công');
+      };
+      
+      if (newAccessKey) {
+        updateData.accessKey = newAccessKey;
+      }
+
+      await updateDoc(doc(db, 'users', uid), updateData);
+      toast.success('Cập nhật người dùng thành công');
     } catch (error) {
       toast.error('Cập nhật thất bại');
     }
@@ -804,7 +871,7 @@ export default function App() {
           transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
           className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mb-4"
         />
-        <p className="text-neutral-400 font-medium">Bé Đức đang lấy dữ liệu...</p>
+        <p className="text-neutral-400 font-medium">Đang khởi tạo hệ thống...</p>
       </div>
     );
   }
@@ -876,6 +943,41 @@ export default function App() {
               Đăng nhập với Google khác
             </button>
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 404 Screen
+  if (isNotFound) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center p-6 bg-[#0a0a0a] text-white">
+        <div className="max-w-md w-full glass p-8 rounded-2xl text-center">
+          <AlertTriangle className="w-16 h-16 text-red-500 mx-auto mb-6" />
+          <h2 className="text-4xl font-bold mb-4">404</h2>
+          <p className="text-neutral-400 mb-6">Trang bạn tìm kiếm không tồn tại.</p>
+          <button onClick={() => window.location.href = '/'} className="btn-primary w-full py-3">Quay lại trang chủ</button>
+        </div>
+      </div>
+    );
+  }
+
+  // Maintenance Screen
+  if (settings?.isMaintenance && profile?.role !== 'admin' && !showSecretLogin) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center p-6 bg-[#0a0a0a] text-white">
+        <div className="max-w-md w-full glass p-8 rounded-2xl text-center">
+          <Settings 
+            className="w-16 h-16 text-blue-500 mx-auto mb-6 animate-spin-slow cursor-pointer" 
+            onClick={() => {
+              setSecretAdminClicks(prev => prev + 1);
+              if (secretAdminClicks >= 4) {
+                setShowSecretLogin(true);
+              }
+            }}
+          />
+          <h2 className="text-2xl font-bold mb-4">Hệ thống bảo trì</h2>
+          <p className="text-neutral-400">Chúng tôi đang nâng cấp hệ thống. Vui lòng quay lại sau.</p>
         </div>
       </div>
     );
@@ -971,7 +1073,7 @@ export default function App() {
                 className="w-full btn-primary py-3 flex items-center justify-center gap-2"
               >
                 <CheckCircle2 className="w-5 h-5" />
-                Đăng nhập
+                Xác minh & Vào hệ thống
               </button>
             </div>
 
@@ -1001,8 +1103,10 @@ export default function App() {
     );
   }
 
+  const isPersonalTabOwner = activePasswordTab === userTabs.find(t => t.ownerId === user?.uid)?.id;
+
   return (
-    <div className="min-h-screen flex bg-[#0a0a0a] text-white relative overflow-hidden">
+    <div className="h-screen flex bg-[#0a0a0a] text-white relative overflow-hidden">
       {/* Watermark */}
       <div className="pointer-events-none fixed inset-0 z-0 flex items-center justify-center opacity-[0.03] select-none">
         <div className="transform -rotate-45 text-center">
@@ -1025,8 +1129,8 @@ export default function App() {
         <div className="p-6 flex flex-col h-full">
           <div className="flex items-center justify-between mb-10">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-blue-500 rounded-xl flex items-center justify-center">
-                <Shield className="w-6 h-6 text-white" />
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center overflow-hidden bg-blue-500/10">
+                <img src={SITE_LOGO} alt="Logo" className="w-full h-full object-cover" />
               </div>
               <span className="text-xl font-bold tracking-tight">SecurePass</span>
             </div>
@@ -1049,6 +1153,12 @@ export default function App() {
                   label="Người dùng" 
                   active={activeTab === 'users'} 
                   onClick={() => setActiveTab('users')} 
+                />
+                <NavItem 
+                  icon={<FolderKey className="w-5 h-5" />} 
+                  label="Tab Mật khẩu User" 
+                  active={activeTab === 'userTabs'} 
+                  onClick={() => setActiveTab('userTabs')} 
                 />
                 <NavItem 
                   icon={<History className="w-5 h-5" />} 
@@ -1094,7 +1204,7 @@ export default function App() {
               {isSidebarOpen ? <X /> : <Menu />}
             </button>
             <h2 className="text-lg font-semibold capitalize">
-              {activeTab === 'passwords' ? 'Mật khẩu' : activeTab === 'users' ? 'Người dùng' : activeTab === 'logs' ? 'Nhật ký' : 'Cài đặt'}
+              {activeTab === 'passwords' ? 'Mật khẩu' : activeTab === 'users' ? 'Người dùng' : activeTab === 'userTabs' ? 'Tab Mật khẩu User' : activeTab === 'logs' ? 'Nhật ký' : 'Cài đặt'}
             </h2>
           </div>
           <div className="flex items-center gap-4">
@@ -1130,21 +1240,25 @@ export default function App() {
               >
                 {/* Statistics Bar */}
                 {profile?.role === 'admin' && (
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                     <div className="glass p-4 rounded-xl">
-                      <p className="text-xs text-neutral-500 uppercase font-bold mb-1">Mật khẩu</p>
-                      <p className="text-2xl font-bold text-blue-500">{stats.totalPasswords}</p>
+                      <p className="text-[10px] text-neutral-500 uppercase font-bold mb-1">MK Chung</p>
+                      <p className="text-2xl font-bold text-blue-500">{stats.totalGeneralPasswords}</p>
                     </div>
                     <div className="glass p-4 rounded-xl">
-                      <p className="text-xs text-neutral-500 uppercase font-bold mb-1">Người dùng</p>
+                      <p className="text-[10px] text-neutral-500 uppercase font-bold mb-1">MK Tab Con</p>
+                      <p className="text-2xl font-bold text-purple-500">{stats.totalTabPasswords}</p>
+                    </div>
+                    <div className="glass p-4 rounded-xl">
+                      <p className="text-[10px] text-neutral-500 uppercase font-bold mb-1">Người dùng</p>
                       <p className="text-2xl font-bold text-green-500">{stats.totalUsers}</p>
                     </div>
                     <div className="glass p-4 rounded-xl">
-                      <p className="text-xs text-neutral-500 uppercase font-bold mb-1">Đang hoạt động</p>
+                      <p className="text-[10px] text-neutral-500 uppercase font-bold mb-1">Hoạt động</p>
                       <p className="text-2xl font-bold text-yellow-500">{stats.activeUsers}</p>
                     </div>
                     <div className="glass p-4 rounded-xl">
-                      <p className="text-xs text-neutral-500 uppercase font-bold mb-1">IP bị chặn</p>
+                      <p className="text-[10px] text-neutral-500 uppercase font-bold mb-1">IP bị chặn</p>
                       <p className="text-2xl font-bold text-red-500">{stats.blockedIpsCount}</p>
                     </div>
                   </div>
@@ -1163,7 +1277,30 @@ export default function App() {
                     <FolderOpen className="w-4 h-4" />
                     Mật khẩu chung
                   </button>
-                  {passwordTabs.map(tab => (
+
+                  {(profile?.role === 'admin') && passwordTabs.map(tab => (
+                    <button
+                      key={tab.id}
+                      onClick={() => {
+                        if (unlockedTabs.includes(tab.id)) {
+                          setActivePasswordTab(tab.id);
+                        } else {
+                          setTabToUnlock(tab);
+                          setIsTabUnlockModalOpen(true);
+                        }
+                      }}
+                      className={`px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
+                        activePasswordTab === tab.id 
+                          ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' 
+                          : 'bg-neutral-900/50 text-neutral-400 hover:bg-neutral-800 hover:text-white'
+                      }`}
+                    >
+                      {unlockedTabs.includes(tab.id) ? <FolderOpen className="w-4 h-4" /> : <FolderLock className="w-4 h-4" />}
+                      {tab.name}
+                      {tab.isHidden && <EyeOff className="w-3 h-3 text-neutral-500 ml-1" />}
+                    </button>
+                  ))}
+                  {(profile?.role !== 'admin') && passwordTabs.filter(t => !t.isHidden).map(tab => (
                     <button
                       key={tab.id}
                       onClick={() => {
@@ -1184,6 +1321,49 @@ export default function App() {
                       {tab.name}
                     </button>
                   ))}
+
+                  {/* User Personal Tab */}
+                  {userTabs.find(t => t.ownerId === user?.uid) ? (() => {
+                    const myTab = userTabs.find(t => t.ownerId === user?.uid)!;
+                    return (
+                      <div key={myTab.id} className="flex items-center gap-1">
+                        <button
+                          onClick={() => {
+                            if (unlockedTabs.includes(myTab.id)) {
+                              setActivePasswordTab(myTab.id);
+                            } else {
+                              setTabToUnlock(myTab);
+                              setIsTabUnlockModalOpen(true);
+                            }
+                          }}
+                          className={`px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
+                            activePasswordTab === myTab.id 
+                              ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/20' 
+                              : 'bg-neutral-900/50 text-neutral-400 hover:bg-neutral-800 hover:text-white'
+                          }`}
+                        >
+                          {unlockedTabs.includes(myTab.id) ? <FolderOpen className="w-4 h-4" /> : <FolderLock className="w-4 h-4" />}
+                          Mật khẩu cá nhân
+                        </button>
+                        <button
+                          onClick={() => setEditingUserTab(myTab)}
+                          className="p-2 text-neutral-500 hover:text-purple-400 hover:bg-purple-400/10 rounded-lg transition-colors"
+                          title="Cài đặt tab cá nhân"
+                        >
+                          <Settings className="w-4 h-4" />
+                        </button>
+                      </div>
+                    );
+                  })() : (
+                    <button
+                      onClick={() => setIsCreateUserTabModalOpen(true)}
+                      className="px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 bg-neutral-900/50 text-neutral-400 hover:bg-neutral-800 hover:text-white border border-dashed border-neutral-700"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Tạo tab cá nhân
+                    </button>
+                  )}
+
                   {profile?.role === 'admin' && (
                     <button
                       onClick={() => setActivePasswordTab('trash')}
@@ -1211,7 +1391,7 @@ export default function App() {
                       onChange={(e) => setSearchTerm(e.target.value)}
                     />
                   </div>
-                  {profile?.role === 'admin' && activePasswordTab !== 'trash' && (
+                  {(profile?.role === 'admin' || isPersonalTabOwner) && activePasswordTab !== 'trash' && (
                     <div className="flex gap-2">
                       <button onClick={handleExportExcel} className="flex items-center gap-2 bg-neutral-800 hover:bg-neutral-700 px-4 py-2.5 rounded-xl text-sm font-medium transition-all">
                         <Download className="w-4 h-4" />
@@ -1251,7 +1431,7 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-neutral-800">
-                        {passwords.filter(p => {
+                        {filteredPasswords.filter(p => {
                           if (activePasswordTab === 'trash') {
                             return p.isDeleted && (p.website.toLowerCase().includes(searchTerm.toLowerCase()) || p.username.toLowerCase().includes(searchTerm.toLowerCase()));
                           }
@@ -1260,7 +1440,11 @@ export default function App() {
                           const matchesSearch = p.website.toLowerCase().includes(searchTerm.toLowerCase()) || 
                                                 p.username.toLowerCase().includes(searchTerm.toLowerCase());
                           return matchesTab && matchesSearch;
-                        }).sort((a, b) => (b.isPinned ? 1 : 0) - (a.isPinned ? 1 : 0)).map((p) => (
+                        }).sort((a, b) => {
+                          const aPinned = a.pinnedBy?.includes(user?.uid || '') ? 1 : 0;
+                          const bPinned = b.pinnedBy?.includes(user?.uid || '') ? 1 : 0;
+                          return bPinned - aPinned;
+                        }).map((p) => (
                           <PasswordRow 
                             key={p.id} 
                             entry={p} 
@@ -1272,11 +1456,12 @@ export default function App() {
                               setPasswordInput(decrypt(p.password));
                               (document.getElementById('add-modal') as any)?.showModal();
                             }}
-                            onTogglePin={() => p.id && handleTogglePinPassword(p.id, !!p.isPinned)}
+                            onTogglePin={() => p.id && handleTogglePinPassword(p.id, p.pinnedBy || [])}
                             onRestore={() => p.id && handleRestorePassword(p.id)}
                             onHardDelete={() => p.id && handleHardDeletePassword(p.id)}
-                            isAdmin={profile?.role === 'admin'}
+                            isAdmin={profile?.role === 'admin' || isPersonalTabOwner}
                             isTrashView={activePasswordTab === 'trash'}
+                            isPinnedByUser={p.pinnedBy?.includes(user?.uid || '')}
                           />
                         ))}
                         {passwords.length === 0 && (
@@ -1339,6 +1524,116 @@ export default function App() {
                             onDelete={handleDeleteUser}
                           />
                         ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'userTabs' && profile?.role === 'admin' && (
+              <motion.div 
+                key="userTabs"
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+                className="space-y-6"
+              >
+                <div className="glass rounded-2xl overflow-hidden p-6">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+                    <div className="flex items-center gap-3">
+                      <h3 className="text-lg font-semibold text-white">Quản lý Tab Mật khẩu User</h3>
+                      <span className="bg-blue-500/20 text-blue-400 px-2.5 py-1 rounded-full text-xs font-medium">
+                        {userTabs.length} tab
+                      </span>
+                    </div>
+                    <div className="relative w-full md:w-64">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
+                      <input 
+                        type="text" 
+                        placeholder="Tìm kiếm tab hoặc email..." 
+                        value={userTabSearchTerm}
+                        onChange={(e) => setUserTabSearchTerm(e.target.value)}
+                        className="w-full bg-black/50 border border-neutral-800 rounded-xl pl-10 pr-4 py-2 text-sm focus:ring-2 focus:ring-blue-500/50 outline-none transition-all"
+                      />
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="bg-neutral-900/50 text-neutral-400 text-xs uppercase tracking-wider">
+                          <th className="px-6 py-4 font-semibold">Tên Tab</th>
+                          <th className="px-6 py-4 font-semibold">Người tạo</th>
+                          <th className="px-6 py-4 font-semibold">Mật khẩu (Giải mã)</th>
+                          <th className="px-6 py-4 font-semibold text-right">Hành động</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-neutral-800">
+                        {userTabs.filter(tab => {
+                          const owner = users.find(u => u.uid === tab.ownerId);
+                          const searchLower = userTabSearchTerm.toLowerCase();
+                          return tab.name.toLowerCase().includes(searchLower) || 
+                                 (owner && owner.email.toLowerCase().includes(searchLower));
+                        }).map((tab) => {
+                          const owner = users.find(u => u.uid === tab.ownerId);
+                          return (
+                            <tr key={tab.id} className="hover:bg-neutral-800/30 transition-colors">
+                              <td className="px-6 py-4 text-sm text-white font-medium">{tab.name}</td>
+                              <td className="px-6 py-4 text-sm text-neutral-300">
+                                {owner ? (
+                                  <div className="flex items-center gap-2">
+                                    <img src={owner.photoURL || `https://ui-avatars.com/api/?name=${owner.email}&background=random`} alt={owner.email} className="w-6 h-6 rounded-full" />
+                                    <span>{owner.email}</span>
+                                  </div>
+                                ) : (
+                                  <span className="text-neutral-500">Không rõ ({tab.ownerId})</span>
+                                )}
+                              </td>
+                              <td className="px-6 py-4 text-sm text-neutral-300 font-mono">
+                                {decrypt(tab.password)}
+                              </td>
+                              <td className="px-6 py-4 text-right">
+                                <div className="flex items-center justify-end gap-2">
+                                  <button 
+                                    onClick={() => setEditingUserTab(tab)}
+                                    className="p-2 text-neutral-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-colors"
+                                    title="Đổi mật khẩu tab"
+                                  >
+                                    <Settings className="w-4 h-4" />
+                                  </button>
+                                  <button 
+                                    onClick={async () => {
+                                      if (window.confirm('Bạn có chắc chắn muốn xóa tab này và tất cả mật khẩu bên trong?')) {
+                                        try {
+                                          await deleteDoc(doc(db, 'userTabs', tab.id));
+                                          // Delete associated passwords
+                                          const q = query(collection(db, 'passwords'), where('tabId', '==', tab.id));
+                                          const snapshot = await getDocs(q);
+                                          const deletePromises = snapshot.docs.map(d => deleteDoc(d.ref));
+                                          await Promise.all(deletePromises);
+                                          toast.success('Đã xóa tab user thành công');
+                                        } catch (error) {
+                                          toast.error('Lỗi khi xóa tab user');
+                                        }
+                                      }
+                                    }}
+                                    className="p-2 text-red-500 hover:bg-red-500/10 rounded-lg transition-colors"
+                                    title="Xóa tab"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {userTabs.length === 0 && (
+                          <tr>
+                            <td colSpan={4} className="px-6 py-8 text-center text-neutral-500">
+                              Chưa có tab mật khẩu user nào được tạo.
+                            </td>
+                          </tr>
+                        )}
                       </tbody>
                     </table>
                   </div>
@@ -1557,59 +1852,61 @@ export default function App() {
                         </button>
                       </div>
 
-                      <div className="space-y-3">
-                        {settings?.contactMethods?.map((method, index) => (
-                          <div key={method.id} className="flex gap-2 items-start">
-                            <select 
-                              value={method.type}
-                              onChange={(e) => {
-                                const newMethods = [...(settings.contactMethods || [])];
-                                newMethods[index].type = e.target.value as any;
-                                setSettings({ ...settings, contactMethods: newMethods });
-                              }}
-                              className="bg-neutral-900 border border-neutral-800 rounded-lg px-2 py-2 text-xs outline-none w-24"
-                            >
-                              <option value="phone">SĐT</option>
-                              <option value="email">Email</option>
-                              <option value="facebook">FB</option>
-                              <option value="telegram">Tele</option>
-                              <option value="zalo">Zalo</option>
-                              <option value="other">Khác</option>
-                            </select>
-                            <input 
-                              type="text"
-                              placeholder="Nhãn (VD: Zalo Admin)"
-                              value={method.label}
-                              onChange={(e) => {
-                                const newMethods = [...(settings.contactMethods || [])];
-                                newMethods[index].label = e.target.value;
-                                setSettings({ ...settings, contactMethods: newMethods });
-                              }}
-                              className="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-xs outline-none"
-                            />
-                            <input 
-                              type="text"
-                              placeholder="Giá trị (VD: 0987...)"
-                              value={method.value}
-                              onChange={(e) => {
-                                const newMethods = [...(settings.contactMethods || [])];
-                                newMethods[index].value = e.target.value;
-                                setSettings({ ...settings, contactMethods: newMethods });
-                              }}
-                              className="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-xs outline-none"
-                            />
-                            <button 
-                              type="button"
-                              onClick={() => {
-                                const newMethods = settings.contactMethods?.filter(m => m.id !== method.id);
-                                setSettings({ ...settings, contactMethods: newMethods });
-                              }}
-                              className="p-2 text-red-500 hover:bg-red-500/10 rounded-lg"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
-                        ))}
+                      <div className="overflow-x-auto pb-2 scrollbar-hide">
+                        <div className="space-y-3 min-w-[500px]">
+                          {settings?.contactMethods?.map((method, index) => (
+                            <div key={method.id} className="flex gap-2 items-start">
+                              <select 
+                                value={method.type}
+                                onChange={(e) => {
+                                  const newMethods = [...(settings.contactMethods || [])];
+                                  newMethods[index].type = e.target.value as any;
+                                  setSettings({ ...settings, contactMethods: newMethods });
+                                }}
+                                className="bg-neutral-900 border border-neutral-800 rounded-lg px-2 py-2 text-xs outline-none w-24"
+                              >
+                                <option value="phone">SĐT</option>
+                                <option value="email">Email</option>
+                                <option value="facebook">FB</option>
+                                <option value="telegram">Tele</option>
+                                <option value="zalo">Zalo</option>
+                                <option value="other">Khác</option>
+                              </select>
+                              <input 
+                                type="text"
+                                placeholder="Nhãn (VD: Zalo Admin)"
+                                value={method.label}
+                                onChange={(e) => {
+                                  const newMethods = [...(settings.contactMethods || [])];
+                                  newMethods[index].label = e.target.value;
+                                  setSettings({ ...settings, contactMethods: newMethods });
+                                }}
+                                className="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-xs outline-none"
+                              />
+                              <input 
+                                type="text"
+                                placeholder="Giá trị (VD: 0987...)"
+                                value={method.value}
+                                onChange={(e) => {
+                                  const newMethods = [...(settings.contactMethods || [])];
+                                  newMethods[index].value = e.target.value;
+                                  setSettings({ ...settings, contactMethods: newMethods });
+                                }}
+                                className="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-xs outline-none"
+                              />
+                              <button 
+                                type="button"
+                                onClick={() => {
+                                  const newMethods = settings.contactMethods?.filter(m => m.id !== method.id);
+                                  setSettings({ ...settings, contactMethods: newMethods });
+                                }}
+                                className="p-2 text-red-500 hover:bg-red-500/10 rounded-lg"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     </div>
 
@@ -1619,7 +1916,7 @@ export default function App() {
                   </form>
                 </div>
 
-                <AdminPasswordTabsSettings passwordTabs={passwordTabs} />
+                <AdminPasswordTabsSettings passwordTabs={passwordTabs} settings={settings} />
               </motion.div>
             )}
           </AnimatePresence>
@@ -1888,13 +2185,192 @@ export default function App() {
           </motion.div>
         </div>
       )}
+
+      {/* Create User Tab Modal */}
+      {isCreateUserTabModalOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="max-w-md w-full bg-neutral-900 border border-neutral-800 rounded-3xl p-8 shadow-2xl"
+          >
+            <h3 className="font-bold text-xl text-white flex items-center gap-3 mb-4">
+              <FolderKey className="w-6 h-6 text-purple-500" />
+              Tạo Tab Cá Nhân
+            </h3>
+            <p className="text-neutral-400 mb-8 leading-relaxed">
+              Tạo một tab bảo mật riêng để lưu trữ mật khẩu cá nhân của bạn.
+            </p>
+            <form onSubmit={async (e) => {
+              e.preventDefault();
+              const form = e.target as HTMLFormElement;
+              const name = (form.elements.namedItem('name') as HTMLInputElement).value;
+              const password = (form.elements.namedItem('password') as HTMLInputElement).value;
+              
+              if (!name || !password) {
+                toast.error('Vui lòng nhập đầy đủ thông tin');
+                return;
+              }
+
+              if (userTabs.some(t => t.ownerId === user?.uid)) {
+                toast.error('Bạn đã có một tab cá nhân rồi.');
+                return;
+              }
+
+              try {
+                await addDoc(collection(db, 'userTabs'), {
+                  name,
+                  password: encrypt(password),
+                  ownerId: user?.uid,
+                  createdAt: new Date().toISOString()
+                });
+                toast.success('Đã tạo tab cá nhân thành công');
+                setIsCreateUserTabModalOpen(false);
+              } catch (error) {
+                toast.error('Lỗi khi tạo tab cá nhân');
+              }
+            }} className="space-y-6">
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-widest mb-2">Tên Tab</label>
+                <input 
+                  type="text" 
+                  name="name"
+                  autoFocus
+                  placeholder="Ví dụ: Mật khẩu cá nhân" 
+                  className="w-full input-field py-4"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-widest mb-2">Mật khẩu bảo vệ</label>
+                <input 
+                  type="password" 
+                  name="password"
+                  placeholder="Nhập mật khẩu..." 
+                  className="w-full input-field py-4"
+                />
+              </div>
+              <div className="flex flex-col gap-4">
+                <button 
+                  type="submit"
+                  className="w-full py-4 rounded-2xl bg-purple-600 hover:bg-purple-700 text-white font-bold transition-all shadow-lg shadow-purple-600/20 active:scale-95"
+                >
+                  Tạo Tab
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => setIsCreateUserTabModalOpen(false)}
+                  className="text-sm text-neutral-400 hover:text-white font-medium"
+                >
+                  Hủy bỏ
+                </button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
+      {/* Edit User Tab Modal */}
+      {editingUserTab && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="max-w-md w-full bg-neutral-900 border border-neutral-800 rounded-3xl p-8 shadow-2xl"
+          >
+            <h3 className="font-bold text-xl text-white flex items-center gap-3 mb-4">
+              <Settings className="w-6 h-6 text-purple-500" />
+              Cài đặt Tab Cá Nhân
+            </h3>
+            <form onSubmit={async (e) => {
+              e.preventDefault();
+              const form = e.target as HTMLFormElement;
+              const name = (form.elements.namedItem('name') as HTMLInputElement).value;
+              const oldPassword = (form.elements.namedItem('oldPassword') as HTMLInputElement).value;
+              const newPassword = (form.elements.namedItem('newPassword') as HTMLInputElement).value;
+              
+              if (!name) {
+                toast.error('Vui lòng nhập tên tab');
+                return;
+              }
+
+              const updateData: any = { name };
+              
+              if (newPassword) {
+                if (profile?.role !== 'admin') {
+                  if (!oldPassword) {
+                    toast.error('Vui lòng nhập mật khẩu cũ để đổi mật khẩu mới');
+                    return;
+                  }
+                  if (oldPassword !== decrypt(editingUserTab.password)) {
+                    toast.error('Mật khẩu cũ không chính xác');
+                    return;
+                  }
+                }
+                updateData.password = encrypt(newPassword);
+              }
+
+              try {
+                await updateDoc(doc(db, 'userTabs', editingUserTab.id), updateData);
+                toast.success('Đã cập nhật tab cá nhân');
+                setEditingUserTab(null);
+              } catch (error) {
+                toast.error('Lỗi khi cập nhật tab cá nhân');
+              }
+            }} className="space-y-6">
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-widest mb-2">Tên Tab</label>
+                <input 
+                  type="text" 
+                  name="name"
+                  defaultValue={editingUserTab.name}
+                  className="w-full input-field py-4"
+                />
+              </div>
+              {profile?.role !== 'admin' && (
+                <div>
+                  <label className="block text-xs font-bold text-neutral-500 uppercase tracking-widest mb-2">Mật khẩu cũ (nếu muốn đổi)</label>
+                  <input 
+                    type="password" 
+                    name="oldPassword"
+                    placeholder="Nhập mật khẩu cũ..." 
+                    className="w-full input-field py-4"
+                  />
+                </div>
+              )}
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-widest mb-2">Mật khẩu mới</label>
+                <input 
+                  type="password" 
+                  name="newPassword"
+                  placeholder="Nhập mật khẩu mới..." 
+                  className="w-full input-field py-4"
+                />
+              </div>
+              <div className="flex flex-col gap-4">
+                <button 
+                  type="submit"
+                  className="w-full py-4 rounded-2xl bg-purple-600 hover:bg-purple-700 text-white font-bold transition-all shadow-lg shadow-purple-600/20 active:scale-95"
+                >
+                  Lưu thay đổi
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => setEditingUserTab(null)}
+                  className="text-sm text-neutral-400 hover:text-white font-medium"
+                >
+                  Hủy bỏ
+                </button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }
 
 // --- SUB-COMPONENTS ---
 
-function AdminPasswordTabsSettings({ passwordTabs }: { passwordTabs: PasswordTab[] }) {
+function AdminPasswordTabsSettings({ passwordTabs, settings }: { passwordTabs: PasswordTab[], settings: any }) {
   const [isAdding, setIsAdding] = useState(false);
   const [editingTab, setEditingTab] = useState<PasswordTab | null>(null);
 
@@ -1903,11 +2379,20 @@ function AdminPasswordTabsSettings({ passwordTabs }: { passwordTabs: PasswordTab
     const formData = new FormData(e.currentTarget);
     const name = formData.get('name') as string;
     const password = formData.get('password') as string;
+    const oldPassword = formData.get('oldPassword') as string;
 
     try {
       if (editingTab) {
         const updateData: any = { name };
         if (password) {
+          if (!oldPassword) {
+            toast.error('Vui lòng nhập mật khẩu cũ để đổi mật khẩu mới');
+            return;
+          }
+          if (oldPassword !== decrypt(editingTab.password)) {
+            toast.error('Mật khẩu cũ không chính xác');
+            return;
+          }
           updateData.password = encrypt(password);
         }
         await updateDoc(doc(db, 'passwordTabs', editingTab.id), updateData);
@@ -1942,7 +2427,7 @@ function AdminPasswordTabsSettings({ passwordTabs }: { passwordTabs: PasswordTab
 
   return (
     <div className="glass p-8 rounded-2xl space-y-8 mt-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <div className="w-12 h-12 bg-purple-500/10 rounded-xl flex items-center justify-center">
             <Lock className="w-6 h-6 text-purple-500" />
@@ -1952,15 +2437,17 @@ function AdminPasswordTabsSettings({ passwordTabs }: { passwordTabs: PasswordTab
             <p className="text-sm text-neutral-400">Thêm, sửa, xóa các tab mật khẩu được bảo vệ</p>
           </div>
         </div>
-        <button 
-          onClick={() => {
-            setEditingTab(null);
-            setIsAdding(true);
-          }}
-          className="btn-primary py-2 px-4 text-sm flex items-center gap-2"
-        >
-          <Plus className="w-4 h-4" /> Thêm Tab
-        </button>
+        <div className="flex items-center gap-3">
+          <button 
+            onClick={() => {
+              setEditingTab(null);
+              setIsAdding(true);
+            }}
+            className="btn-primary py-2 px-4 text-sm flex items-center gap-2"
+          >
+            <Plus className="w-4 h-4" /> Thêm Tab
+          </button>
+        </div>
       </div>
 
       {(isAdding || editingTab) && (
@@ -1978,16 +2465,39 @@ function AdminPasswordTabsSettings({ passwordTabs }: { passwordTabs: PasswordTab
                 className="w-full input-field py-2.5 text-sm"
               />
             </div>
-            <div>
-              <label className="block text-xs font-medium text-neutral-500 mb-1.5 uppercase tracking-wider">Mật khẩu bảo vệ</label>
-              <input 
-                name="password"
-                type="password" 
-                placeholder={editingTab ? "Để trống nếu không muốn đổi" : "Nhập mật khẩu"}
-                required={!editingTab}
-                className="w-full input-field py-2.5 text-sm"
-              />
-            </div>
+            {editingTab ? (
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-neutral-500 mb-1.5 uppercase tracking-wider">Mật khẩu cũ</label>
+                  <input 
+                    name="oldPassword"
+                    type="password" 
+                    placeholder="Nhập mật khẩu cũ để đổi"
+                    className="w-full input-field py-2.5 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-neutral-500 mb-1.5 uppercase tracking-wider">Mật khẩu mới</label>
+                  <input 
+                    name="password"
+                    type="password" 
+                    placeholder="Để trống nếu không muốn đổi"
+                    className="w-full input-field py-2.5 text-sm"
+                  />
+                </div>
+              </>
+            ) : (
+              <div>
+                <label className="block text-xs font-medium text-neutral-500 mb-1.5 uppercase tracking-wider">Mật khẩu bảo vệ</label>
+                <input 
+                  name="password"
+                  type="password" 
+                  placeholder="Nhập mật khẩu"
+                  required
+                  className="w-full input-field py-2.5 text-sm"
+                />
+              </div>
+            )}
           </div>
           <div className="flex justify-end gap-2 pt-2">
             <button 
@@ -2013,8 +2523,25 @@ function AdminPasswordTabsSettings({ passwordTabs }: { passwordTabs: PasswordTab
             <div className="flex items-center gap-3">
               <Lock className="w-4 h-4 text-neutral-500" />
               <span className="font-medium">{tab.name}</span>
+              {tab.isHidden && <span className="bg-neutral-800 text-neutral-400 px-2 py-0.5 rounded text-[10px] uppercase tracking-wider font-bold">Đang ẩn</span>}
             </div>
             <div className="flex items-center gap-2">
+              <button 
+                onClick={async () => {
+                  try {
+                    await updateDoc(doc(db, 'passwordTabs', tab.id), {
+                      isHidden: !tab.isHidden
+                    });
+                    toast.success(tab.isHidden ? 'Đã hiện tab' : 'Đã ẩn tab');
+                  } catch (error) {
+                    toast.error('Lỗi khi cập nhật trạng thái tab');
+                  }
+                }}
+                className={`p-2 rounded-lg transition-colors ${tab.isHidden ? 'text-neutral-500 hover:bg-neutral-800 hover:text-white' : 'text-blue-400 hover:bg-blue-500/10'}`}
+                title={tab.isHidden ? "Hiện tab này" : "Ẩn tab này"}
+              >
+                {tab.isHidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
               <button 
                 onClick={() => setEditingTab(tab)}
                 className="p-2 text-neutral-500 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-colors"
@@ -2097,8 +2624,9 @@ const PasswordRow: React.FC<{
   onRestore?: () => void,
   onHardDelete?: () => void,
   isAdmin: boolean,
-  isTrashView?: boolean
-}> = ({ entry, onCopy, onView, onDelete, onEdit, onTogglePin, onRestore, onHardDelete, isAdmin, isTrashView }) => {
+  isTrashView?: boolean,
+  isPinnedByUser?: boolean
+}> = ({ entry, onCopy, onView, onDelete, onEdit, onTogglePin, onRestore, onHardDelete, isAdmin, isTrashView, isPinnedByUser }) => {
   const [showPass, setShowPass] = useState(false);
   const favicon = `https://www.google.com/s2/favicons?domain=${entry.website}&sz=64`;
 
@@ -2112,14 +2640,14 @@ const PasswordRow: React.FC<{
   };
 
   return (
-    <tr className={`text-sm hover:bg-neutral-900/30 transition-colors group ${entry.isPinned ? 'bg-blue-900/10' : ''}`}>
+    <tr className={`text-sm hover:bg-neutral-900/30 transition-colors group ${isPinnedByUser ? 'bg-blue-900/10' : ''}`}>
       <td className="px-6 py-4 min-w-[200px]">
         <div className="flex items-center gap-3">
           <button 
             onClick={onTogglePin}
-            className={`p-1.5 rounded-lg transition-all ${entry.isPinned ? 'text-yellow-500 hover:bg-yellow-500/10' : 'text-neutral-600 hover:text-yellow-500 hover:bg-yellow-500/10 opacity-0 group-hover:opacity-100'}`}
+            className={`p-1.5 rounded-lg transition-all ${isPinnedByUser ? 'text-yellow-500 hover:bg-yellow-500/10' : 'text-neutral-600 hover:text-yellow-500 hover:bg-yellow-500/10 opacity-0 group-hover:opacity-100'}`}
           >
-            <Star className="w-4 h-4" fill={entry.isPinned ? "currentColor" : "none"} />
+            <Star className="w-4 h-4" fill={isPinnedByUser ? "currentColor" : "none"} />
           </button>
           <img 
             src={favicon} 
@@ -2229,8 +2757,10 @@ const PasswordRow: React.FC<{
   );
 }
 
-const UserRow: React.FC<{ user: UserProfile, onUpdate: (uid: string, disabled: boolean) => void, onDelete: (uid: string) => void }> = ({ user, onUpdate, onDelete }) => {
+const UserRow: React.FC<{ user: UserProfile, onUpdate: (uid: string, disabled: boolean, newAccessKey?: string) => void, onDelete: (uid: string) => void }> = ({ user, onUpdate, onDelete }) => {
   const [disabled, setDisabled] = useState(!!user.isDisabled);
+  const [isEditingKey, setIsEditingKey] = useState(false);
+  const [newKey, setNewKey] = useState(user.accessKey || '');
   const status = user.isDisabled ? 'locked' : (user.status || 'active');
 
   return (
@@ -2298,17 +2828,47 @@ const UserRow: React.FC<{ user: UserProfile, onUpdate: (uid: string, disabled: b
       <td className="px-6 py-4 min-w-[150px]">
         <div className="flex flex-col gap-1">
           <p className="text-[10px] text-neutral-500 mb-1">Mã truy cập:</p>
-          <div className="flex items-center gap-2 bg-neutral-900 border border-neutral-800 px-2 py-1 rounded font-mono text-[10px] text-blue-400">
-            {user.accessKey || 'N/A'}
-            <button onClick={() => {
-              if (user.accessKey) {
-                navigator.clipboard.writeText(user.accessKey);
-                toast.success('Đã sao chép mã truy cập');
-              }
-            }} className="hover:text-white">
-              <Copy className="w-3 h-3" />
-            </button>
-          </div>
+          {isEditingKey ? (
+            <div className="flex items-center gap-2">
+              <input 
+                type="text" 
+                value={newKey} 
+                onChange={(e) => setNewKey(e.target.value)}
+                className="bg-neutral-900 border border-neutral-800 px-2 py-1 rounded font-mono text-[10px] text-white outline-none w-24"
+              />
+              <button onClick={() => {
+                if (newKey.length !== 8) {
+                  toast.error('Mã truy cập phải có đúng 8 ký tự');
+                  return;
+                }
+                onUpdate(user.uid, disabled, newKey);
+                setIsEditingKey(false);
+              }} className="text-green-400 hover:text-green-300">
+                <CheckCircle2 className="w-4 h-4" />
+              </button>
+              <button onClick={() => {
+                setNewKey(user.accessKey || '');
+                setIsEditingKey(false);
+              }} className="text-red-400 hover:text-red-300">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 bg-neutral-900 border border-neutral-800 px-2 py-1 rounded font-mono text-[10px] text-blue-400">
+              {user.accessKey || 'N/A'}
+              <button onClick={() => {
+                if (user.accessKey) {
+                  navigator.clipboard.writeText(user.accessKey);
+                  toast.success('Đã sao chép mã truy cập');
+                }
+              }} className="hover:text-white">
+                <Copy className="w-3 h-3" />
+              </button>
+              <button onClick={() => setIsEditingKey(true)} className="hover:text-white ml-auto">
+                <Settings className="w-3 h-3" />
+              </button>
+            </div>
+          )}
         </div>
       </td>
       <td className="px-6 py-4 text-right min-w-[120px]">

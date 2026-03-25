@@ -804,7 +804,7 @@ export default function App() {
           transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
           className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mb-4"
         />
-        <p className="text-neutral-400 font-medium">Đang khởi tạo hệ thống...</p>
+        <p className="text-neutral-400 font-medium">Bé Đức đang lấy dữ liệu...</p>
       </div>
     );
   }
@@ -971,7 +971,7 @@ export default function App() {
                 className="w-full btn-primary py-3 flex items-center justify-center gap-2"
               >
                 <CheckCircle2 className="w-5 h-5" />
-                Xác minh & Vào hệ thống
+                Đăng nhập
               </button>
             </div>
 

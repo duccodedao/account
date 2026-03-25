@@ -977,7 +977,32 @@ export default function App() {
             }}
           />
           <h2 className="text-2xl font-bold mb-4">Hệ thống bảo trì</h2>
-          <p className="text-neutral-400">Chúng tôi đang nâng cấp hệ thống. Vui lòng quay lại sau.</p>
+          <p className="text-neutral-400 mb-6">Chúng tôi đang nâng cấp hệ thống. Vui lòng quay lại sau.</p>
+          
+          {user && (
+            <div className="flex items-center gap-3 p-3 bg-neutral-900/50 rounded-xl border border-neutral-800 mb-6 max-w-xs mx-auto text-left">
+              <img 
+                src={user.photoURL || 'https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y'} 
+                className="w-10 h-10 rounded-full border border-neutral-700" 
+                alt="Avatar" 
+                referrerPolicy="no-referrer"
+              />
+              <div className="flex flex-col min-w-0">
+                <span className="text-sm font-bold text-white truncate">{user.displayName || 'Người dùng'}</span>
+                <span className="text-xs text-neutral-500 truncate">{user.email}</span>
+              </div>
+            </div>
+          )}
+          
+          {user && (
+            <button 
+              onClick={() => signOut(auth)}
+              className="flex items-center justify-center gap-2 py-2 text-xs text-neutral-500 hover:text-red-400 transition-colors mx-auto"
+            >
+              <LogOut className="w-4 h-4" />
+              Đăng xuất tài khoản
+            </button>
+          )}
         </div>
       </div>
     );
@@ -1022,6 +1047,21 @@ export default function App() {
               <p className="text-xs text-neutral-400">Yêu cầu xác minh để tiếp tục</p>
             </div>
           </div>
+          
+          {user && (
+            <div className="flex items-center gap-3 p-3 bg-neutral-900/50 rounded-xl border border-neutral-800 mb-6">
+              <img 
+                src={user.photoURL || 'https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y'} 
+                className="w-10 h-10 rounded-full border border-neutral-700" 
+                alt="Avatar" 
+                referrerPolicy="no-referrer"
+              />
+              <div className="flex flex-col min-w-0">
+                <span className="text-sm font-bold text-white truncate">{user.displayName || 'Người dùng'}</span>
+                <span className="text-xs text-neutral-500 truncate">{user.email}</span>
+              </div>
+            </div>
+          )}
           
           <div className="space-y-4">
             <div>
@@ -1074,6 +1114,14 @@ export default function App() {
               >
                 <CheckCircle2 className="w-5 h-5" />
                 Xác minh & Vào hệ thống
+              </button>
+              
+              <button 
+                onClick={() => signOut(auth)}
+                className="w-full flex items-center justify-center gap-2 py-2 text-xs text-neutral-500 hover:text-red-400 transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+                Đăng xuất tài khoản
               </button>
             </div>
 

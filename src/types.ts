@@ -25,15 +25,26 @@ export interface PasswordEntry {
   username: string;
   password: string; // Encrypted
   notes?: string;
+  tabId?: string; // 'general' or specific tab ID
+  isPinned?: boolean;
+  isDeleted?: boolean;
+  deletedAt?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PasswordTab {
+  id: string;
+  name: string;
+  password: string; // Encrypted
+  createdAt: string;
 }
 
 export interface ActivityLog {
   id?: string;
   uid: string;
   email: string;
-  action: 'login' | 'copy_password' | 'access_web' | 'logout';
+  action: 'login' | 'copy_password' | 'access_web' | 'logout' | 'view_password';
   details: string;
   timestamp: string;
   ip?: string;

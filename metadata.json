@@ -1,5 +1,5 @@
 {
-  "name": "SecurePass Manager",
-  "description": "A professional password management system with multi-layer authentication, access limits, and activity logging.",
+  "name": "Bmass Account",
+  "description": "Hệ thống quản lý mật khẩu chuyên nghiệp.",
   "requestFramePermissions": ["geolocation"]
 }

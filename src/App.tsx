@@ -28,7 +28,8 @@ import {
   PasswordEntry, 
   ActivityLog, 
   SystemSettings,
-  ContactMethod
+  ContactMethod,
+  PasswordTab
 } from './types';
 import { encrypt, decrypt } from './lib/crypto';
 import { Toaster, toast } from 'sonner';
@@ -61,7 +62,11 @@ import {
   Facebook,
   Send,
   MessageCircle,
-  Link
+  Link,
+  FolderLock,
+  FolderOpen,
+  Star,
+  ArchiveRestore
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { format, isAfter, isBefore, parseISO, isValid } from 'date-fns';
@@ -85,6 +90,19 @@ const ensureString = (val: any, fallback: string = ''): string => {
   if (val && typeof val.toISOString === 'function') return val.toISOString();
   if (val && typeof val.seconds === 'number') return new Date(val.seconds * 1000).toISOString();
   return fallback;
+};
+
+const calculatePasswordStrength = (password: string): { score: number, label: string, color: string } => {
+  let score = 0;
+  if (!password) return { score: 0, label: 'Chưa nhập', color: 'bg-neutral-800' };
+  if (password.length > 8) score += 1;
+  if (/[a-z]/.test(password) && /[A-Z]/.test(password)) score += 1;
+  if (/\d/.test(password)) score += 1;
+  if (/[^a-zA-Z0-9]/.test(password)) score += 1;
+
+  if (score <= 1) return { score, label: 'Yếu', color: 'bg-red-500' };
+  if (score === 2 || score === 3) return { score, label: 'Trung bình', color: 'bg-yellow-500' };
+  return { score, label: 'Mạnh', color: 'bg-green-500' };
 };
 
 // Constants
@@ -111,6 +129,13 @@ export default function App() {
   // App State
   const [activeTab, setActiveTab] = useState<'passwords' | 'users' | 'logs' | 'settings'>('passwords');
   const [passwords, setPasswords] = useState<PasswordEntry[]>([]);
+  const [passwordTabs, setPasswordTabs] = useState<PasswordTab[]>([]);
+  const [activePasswordTab, setActivePasswordTab] = useState<string>('general');
+  const [unlockedTabs, setUnlockedTabs] = useState<string[]>([]);
+  const [tabPasswordInput, setTabPasswordInput] = useState('');
+  const [isTabUnlockModalOpen, setIsTabUnlockModalOpen] = useState(false);
+  const [tabToUnlock, setTabToUnlock] = useState<PasswordTab | null>(null);
+  
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
@@ -145,6 +170,7 @@ export default function App() {
   const [specialPasswordInput, setSpecialPasswordInput] = useState('');
   const [isDeletingLogs, setIsDeletingLogs] = useState(false);
   const [showSpecialPassHint, setShowSpecialPassHint] = useState(false);
+  const [passwordInput, setPasswordInput] = useState('');
   
   // Loading States
   const [isLoading, setIsLoading] = useState(true);
@@ -321,6 +347,13 @@ export default function App() {
       console.error("Passwords snapshot error:", error);
     });
 
+    const qTabs = query(collection(db, 'passwordTabs'), orderBy('createdAt', 'asc'));
+    const unsubTabs = onSnapshot(qTabs, (snapshot) => {
+      setPasswordTabs(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as PasswordTab)));
+    }, (error) => {
+      console.error("PasswordTabs snapshot error:", error);
+    });
+
     let unsubUsers = () => {};
     let unsubLogs = () => {};
 
@@ -338,6 +371,7 @@ export default function App() {
 
     return () => {
       unsubPasswords();
+      unsubTabs();
       unsubUsers();
       unsubLogs();
     };
@@ -363,6 +397,56 @@ export default function App() {
       handleLogout();
     }
   }, [settings, profile]);
+
+  // --- ANTI-SCREENSHOT ---
+  useEffect(() => {
+    if (!isSecondaryAuthPassed) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'PrintScreen') {
+        toast.error('Cảnh báo: Không được phép chụp màn hình!', { duration: 5000 });
+        logActivity('access_web', 'Cảnh báo: Cố gắng chụp màn hình (PrintScreen)');
+      }
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && ['3', '4', '5', 's', 'S'].includes(e.key)) {
+        toast.error('Cảnh báo: Không được phép chụp màn hình!', { duration: 5000 });
+        logActivity('access_web', 'Cảnh báo: Cố gắng chụp màn hình (Phím tắt)');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isSecondaryAuthPassed, logActivity]);
+
+  // --- AUTO-LOCK (SESSION TIMEOUT) ---
+  useEffect(() => {
+    if (!isSecondaryAuthPassed) return;
+
+    let timeoutId: NodeJS.Timeout;
+
+    const resetTimeout = () => {
+      clearTimeout(timeoutId);
+      // 5 minutes timeout
+      timeoutId = setTimeout(() => {
+        setIsSecondaryAuthPassed(false);
+        toast.info('Phiên làm việc đã hết hạn do không hoạt động');
+      }, 5 * 60 * 1000);
+    };
+
+    const events = ['mousemove', 'keydown', 'touchstart', 'scroll', 'click'];
+    
+    events.forEach(event => {
+      window.addEventListener(event, resetTimeout);
+    });
+
+    resetTimeout();
+
+    return () => {
+      clearTimeout(timeoutId);
+      events.forEach(event => {
+        window.removeEventListener(event, resetTimeout);
+      });
+    };
+  }, [isSecondaryAuthPassed]);
 
   // --- HANDLERS ---
   const handleLogin = async () => {
@@ -447,6 +531,7 @@ export default function App() {
           username,
           password: encrypt(password),
           notes: notes || '',
+          tabId: activePasswordTab,
           updatedAt: new Date().toISOString(),
         });
         toast.success('Cập nhật mật khẩu thành công');
@@ -456,6 +541,7 @@ export default function App() {
           username,
           password: encrypt(password),
           notes: notes || '',
+          tabId: activePasswordTab,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         });
@@ -470,15 +556,53 @@ export default function App() {
 
   const handleDeletePassword = async (id: string) => {
     try {
-      await deleteDoc(doc(db, 'passwords', id));
-      toast.success('Đã xóa mật khẩu');
+      await updateDoc(doc(db, 'passwords', id), {
+        isDeleted: true,
+        deletedAt: new Date().toISOString()
+      });
+      toast.success('Đã chuyển mật khẩu vào thùng rác');
     } catch (error) {
       toast.error('Xóa thất bại');
     }
   };
 
+  const handleHardDeletePassword = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'passwords', id));
+      toast.success('Đã xóa vĩnh viễn mật khẩu');
+    } catch (error) {
+      toast.error('Xóa thất bại');
+    }
+  };
+
+  const handleRestorePassword = async (id: string) => {
+    try {
+      await updateDoc(doc(db, 'passwords', id), {
+        isDeleted: false,
+        deletedAt: null
+      });
+      toast.success('Đã khôi phục mật khẩu');
+    } catch (error) {
+      toast.error('Khôi phục thất bại');
+    }
+  };
+
+  const handleTogglePinPassword = async (id: string, currentPinStatus: boolean) => {
+    try {
+      await updateDoc(doc(db, 'passwords', id), {
+        isPinned: !currentPinStatus
+      });
+      toast.success(currentPinStatus ? 'Đã bỏ ghim mật khẩu' : 'Đã ghim mật khẩu');
+    } catch (error) {
+      toast.error('Thao tác thất bại');
+    }
+  };
+
   const handleExportExcel = () => {
-    const dataToExport = passwords.map(p => ({
+    const filteredPasswords = passwords.filter(p => {
+      return activePasswordTab === 'general' ? (!p.tabId || p.tabId === 'general') : p.tabId === activePasswordTab;
+    });
+    const dataToExport = filteredPasswords.map(p => ({
       Website: p.website,
       Username: p.username,
       Password: decrypt(p.password),
@@ -508,10 +632,12 @@ export default function App() {
 
       for (const row of data) {
         if (row.Website && row.Username && row.Password) {
-          const existing = passwords.find(p => 
-            p.website.toLowerCase() === row.Website.toString().toLowerCase() && 
-            p.username.toLowerCase() === row.Username.toString().toLowerCase()
-          );
+          const existing = passwords.find(p => {
+            const matchesTab = activePasswordTab === 'general' ? (!p.tabId || p.tabId === 'general') : p.tabId === activePasswordTab;
+            return matchesTab && 
+                   p.website.toLowerCase() === row.Website.toString().toLowerCase() && 
+                   p.username.toLowerCase() === row.Username.toString().toLowerCase();
+          });
           
           if (existing) {
             duplicates.push({ row, existingId: existing.id! });
@@ -534,6 +660,7 @@ export default function App() {
             username: row.Username,
             password: encrypt(row.Password.toString()),
             notes: row.Notes || '',
+            tabId: activePasswordTab,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           });
@@ -557,6 +684,7 @@ export default function App() {
         username: row.Username,
         password: encrypt(row.Password.toString()),
         notes: row.Notes || '',
+        tabId: activePasswordTab,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
@@ -579,6 +707,7 @@ export default function App() {
           username: entry.row.Username,
           password: encrypt(entry.row.Password.toString()),
           notes: entry.row.Notes || '',
+          tabId: activePasswordTab,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         });
@@ -649,6 +778,20 @@ export default function App() {
       toast.success('Cài đặt hệ thống đã được lưu');
     } catch (error) {
       toast.error('Lưu cài đặt thất bại');
+    }
+  };
+
+  const handleUnlockTab = () => {
+    if (!tabToUnlock) return;
+    if (tabPasswordInput === decrypt(tabToUnlock.password)) {
+      setUnlockedTabs(prev => [...prev, tabToUnlock.id]);
+      setActivePasswordTab(tabToUnlock.id);
+      setIsTabUnlockModalOpen(false);
+      setTabPasswordInput('');
+      setTabToUnlock(null);
+      toast.success('Đã mở khóa tab');
+    } else {
+      toast.error('Mật khẩu không chính xác');
     }
   };
 
@@ -859,7 +1002,16 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen flex bg-[#0a0a0a] text-white">
+    <div className="min-h-screen flex bg-[#0a0a0a] text-white relative overflow-hidden">
+      {/* Watermark */}
+      <div className="pointer-events-none fixed inset-0 z-0 flex items-center justify-center opacity-[0.03] select-none">
+        <div className="transform -rotate-45 text-center">
+          <p className="text-6xl font-black tracking-widest uppercase">{profile?.email}</p>
+          <p className="text-2xl font-bold mt-4">{profile?.lastIp || 'N/A'}</p>
+          <p className="text-xl font-medium mt-2">{new Date().toLocaleDateString()}</p>
+        </div>
+      </div>
+
       {/* Sidebar Overlay */}
       {isSidebarOpen && (
         <div 
@@ -998,6 +1150,55 @@ export default function App() {
                   </div>
                 )}
 
+                {/* Tabs Bar */}
+                <div className="flex items-center gap-2 overflow-x-auto pb-2 mb-4 scrollbar-hide">
+                  <button
+                    onClick={() => setActivePasswordTab('general')}
+                    className={`px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
+                      activePasswordTab === 'general' 
+                        ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' 
+                        : 'bg-neutral-900/50 text-neutral-400 hover:bg-neutral-800 hover:text-white'
+                    }`}
+                  >
+                    <FolderOpen className="w-4 h-4" />
+                    Mật khẩu chung
+                  </button>
+                  {passwordTabs.map(tab => (
+                    <button
+                      key={tab.id}
+                      onClick={() => {
+                        if (unlockedTabs.includes(tab.id)) {
+                          setActivePasswordTab(tab.id);
+                        } else {
+                          setTabToUnlock(tab);
+                          setIsTabUnlockModalOpen(true);
+                        }
+                      }}
+                      className={`px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
+                        activePasswordTab === tab.id 
+                          ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' 
+                          : 'bg-neutral-900/50 text-neutral-400 hover:bg-neutral-800 hover:text-white'
+                      }`}
+                    >
+                      {unlockedTabs.includes(tab.id) ? <FolderOpen className="w-4 h-4" /> : <FolderLock className="w-4 h-4" />}
+                      {tab.name}
+                    </button>
+                  ))}
+                  {profile?.role === 'admin' && (
+                    <button
+                      onClick={() => setActivePasswordTab('trash')}
+                      className={`px-4 py-2 rounded-xl text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ml-auto ${
+                        activePasswordTab === 'trash' 
+                          ? 'bg-red-600 text-white shadow-lg shadow-red-600/20' 
+                          : 'bg-neutral-900/50 text-neutral-400 hover:bg-neutral-800 hover:text-white'
+                      }`}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      Thùng rác
+                    </button>
+                  )}
+                </div>
+
                 {/* Actions Bar */}
                 <div className="flex flex-col md:flex-row gap-4 justify-between">
                   <div className="relative flex-1 max-w-md">
@@ -1010,7 +1211,7 @@ export default function App() {
                       onChange={(e) => setSearchTerm(e.target.value)}
                     />
                   </div>
-                  {profile?.role === 'admin' && (
+                  {profile?.role === 'admin' && activePasswordTab !== 'trash' && (
                     <div className="flex gap-2">
                       <button onClick={handleExportExcel} className="flex items-center gap-2 bg-neutral-800 hover:bg-neutral-700 px-4 py-2.5 rounded-xl text-sm font-medium transition-all">
                         <Download className="w-4 h-4" />
@@ -1022,7 +1223,11 @@ export default function App() {
                         <input type="file" accept=".xlsx" className="hidden" onChange={handleImportExcel} />
                       </label>
                       <button 
-                        onClick={() => (document.getElementById('add-modal') as any)?.showModal()}
+                        onClick={() => {
+                          setEditingPassword(null);
+                          setPasswordInput('');
+                          (document.getElementById('add-modal') as any)?.showModal();
+                        }}
                         className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 px-4 py-2.5 rounded-xl text-sm font-medium transition-all"
                       >
                         <Plus className="w-4 h-4" />
@@ -1046,20 +1251,32 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-neutral-800">
-                        {passwords.filter(p => 
-                          p.website.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                          p.username.toLowerCase().includes(searchTerm.toLowerCase())
-                        ).map((p) => (
+                        {passwords.filter(p => {
+                          if (activePasswordTab === 'trash') {
+                            return p.isDeleted && (p.website.toLowerCase().includes(searchTerm.toLowerCase()) || p.username.toLowerCase().includes(searchTerm.toLowerCase()));
+                          }
+                          if (p.isDeleted) return false;
+                          const matchesTab = activePasswordTab === 'general' ? (!p.tabId || p.tabId === 'general') : p.tabId === activePasswordTab;
+                          const matchesSearch = p.website.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                                                p.username.toLowerCase().includes(searchTerm.toLowerCase());
+                          return matchesTab && matchesSearch;
+                        }).sort((a, b) => (b.isPinned ? 1 : 0) - (a.isPinned ? 1 : 0)).map((p) => (
                           <PasswordRow 
                             key={p.id} 
                             entry={p} 
                             onCopy={() => handleCopyPassword(p)} 
+                            onView={() => logActivity('view_password', `Đã xem mật khẩu cho ${p.website} (${p.username})`)}
                             onDelete={() => p.id && handleDeletePassword(p.id)}
                             onEdit={() => {
                               setEditingPassword(p);
+                              setPasswordInput(decrypt(p.password));
                               (document.getElementById('add-modal') as any)?.showModal();
                             }}
+                            onTogglePin={() => p.id && handleTogglePinPassword(p.id, !!p.isPinned)}
+                            onRestore={() => p.id && handleRestorePassword(p.id)}
+                            onHardDelete={() => p.id && handleHardDeletePassword(p.id)}
                             isAdmin={profile?.role === 'admin'}
+                            isTrashView={activePasswordTab === 'trash'}
                           />
                         ))}
                         {passwords.length === 0 && (
@@ -1158,6 +1375,7 @@ export default function App() {
                       <option value="login">Đăng nhập</option>
                       <option value="logout">Đăng xuất</option>
                       <option value="copy_password">Sao chép mật khẩu</option>
+                      <option value="view_password">Xem mật khẩu</option>
                       <option value="access_web">Truy cập web</option>
                     </select>
                     <button 
@@ -1196,11 +1414,15 @@ export default function App() {
                             <td className="px-6 py-4 whitespace-nowrap">
                               <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase ${
                                 l.action === 'login' ? 'bg-green-500/10 text-green-400' :
+                                l.action === 'logout' ? 'bg-orange-500/10 text-orange-400' :
                                 l.action === 'copy_password' ? 'bg-blue-500/10 text-blue-400' :
+                                l.action === 'view_password' ? 'bg-purple-500/10 text-purple-400' :
                                 'bg-neutral-500/10 text-neutral-400'
                               }`}>
                                 {l.action === 'login' ? 'Đăng nhập' : 
+                                 l.action === 'logout' ? 'Đăng xuất' : 
                                  l.action === 'copy_password' ? 'Sao chép MK' : 
+                                 l.action === 'view_password' ? 'Xem MK' : 
                                  l.action?.replace('_', ' ') || 'KHÔNG XÁC ĐỊNH'}
                               </span>
                             </td>
@@ -1396,6 +1618,8 @@ export default function App() {
                     </button>
                   </form>
                 </div>
+
+                <AdminPasswordTabsSettings passwordTabs={passwordTabs} />
               </motion.div>
             )}
           </AnimatePresence>
@@ -1434,8 +1658,46 @@ export default function App() {
               <input name="username" type="text" defaultValue={editingPassword?.username} required placeholder="Email hoặc số điện thoại" className="w-full input-field" />
             </div>
             <div>
-              <label className="block text-sm font-medium text-neutral-400 mb-1.5">Mật khẩu</label>
-              <input name="password" type="text" defaultValue={editingPassword?.password ? decrypt(editingPassword.password) : ''} required placeholder="Nhập mật khẩu" className="w-full input-field" />
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-sm font-medium text-neutral-400">Mật khẩu</label>
+                <button 
+                  type="button"
+                  onClick={() => {
+                    const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+~`|}{[]:;?><,./-=";
+                    let pass = "";
+                    for (let i = 0; i < 16; i++) {
+                      pass += chars.charAt(Math.floor(Math.random() * chars.length));
+                    }
+                    setPasswordInput(pass);
+                  }}
+                  className="text-xs text-blue-400 hover:text-blue-300 font-medium flex items-center gap-1"
+                >
+                  <Key className="w-3 h-3" />
+                  Tạo ngẫu nhiên
+                </button>
+              </div>
+              <input 
+                name="password" 
+                type="text" 
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                required 
+                placeholder="Nhập mật khẩu" 
+                className="w-full input-field" 
+              />
+              {passwordInput && (
+                <div className="mt-2 flex items-center gap-2">
+                  <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+                    <div 
+                      className={`h-full ${calculatePasswordStrength(passwordInput).color} transition-all duration-300`}
+                      style={{ width: `${(calculatePasswordStrength(passwordInput).score / 5) * 100}%` }}
+                    />
+                  </div>
+                  <span className={`text-xs font-medium ${calculatePasswordStrength(passwordInput).color.replace('bg-', 'text-')}`}>
+                    {calculatePasswordStrength(passwordInput).label}
+                  </span>
+                </div>
+              )}
             </div>
             <div>
               <label className="block text-sm font-medium text-neutral-400 mb-1.5">Ghi chú</label>
@@ -1572,11 +1834,211 @@ export default function App() {
           </motion.div>
         </div>
       )}
+
+      {/* Tab Unlock Modal */}
+      {isTabUnlockModalOpen && tabToUnlock && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="max-w-md w-full bg-neutral-900 border border-neutral-800 rounded-3xl p-8 shadow-2xl"
+          >
+            <h3 className="font-bold text-xl text-white flex items-center gap-3 mb-4">
+              <Lock className="w-6 h-6 text-blue-500" />
+              Mở khóa Tab: {tabToUnlock.name}
+            </h3>
+            <p className="text-neutral-400 mb-8 leading-relaxed">
+              Vui lòng nhập mật khẩu riêng để truy cập vào tab này.
+            </p>
+            <div className="space-y-6">
+              <div>
+                <label className="block text-xs font-bold text-neutral-500 uppercase tracking-widest mb-2">Mật khẩu</label>
+                <input 
+                  type="password" 
+                  value={tabPasswordInput}
+                  onChange={(e) => setTabPasswordInput(e.target.value)}
+                  placeholder="Nhập mật khẩu"
+                  className="w-full input-field py-4"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      handleUnlockTab();
+                    }
+                  }}
+                />
+              </div>
+              <div className="flex flex-col gap-4">
+                <button 
+                  onClick={handleUnlockTab}
+                  className="w-full py-4 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-bold transition-all shadow-lg shadow-blue-600/20 active:scale-95"
+                >
+                  Xác nhận
+                </button>
+                <button 
+                  onClick={() => {
+                    setIsTabUnlockModalOpen(false);
+                    setTabPasswordInput('');
+                    setTabToUnlock(null);
+                  }}
+                  className="text-sm text-neutral-400 hover:text-white font-medium"
+                >
+                  Hủy bỏ
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }
 
 // --- SUB-COMPONENTS ---
+
+function AdminPasswordTabsSettings({ passwordTabs }: { passwordTabs: PasswordTab[] }) {
+  const [isAdding, setIsAdding] = useState(false);
+  const [editingTab, setEditingTab] = useState<PasswordTab | null>(null);
+
+  const handleSaveTab = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
+    const name = formData.get('name') as string;
+    const password = formData.get('password') as string;
+
+    try {
+      if (editingTab) {
+        const updateData: any = { name };
+        if (password) {
+          updateData.password = encrypt(password);
+        }
+        await updateDoc(doc(db, 'passwordTabs', editingTab.id), updateData);
+        toast.success('Đã cập nhật tab');
+      } else {
+        if (!password) {
+          toast.error('Vui lòng nhập mật khẩu cho tab mới');
+          return;
+        }
+        await addDoc(collection(db, 'passwordTabs'), {
+          name,
+          password: encrypt(password),
+          createdAt: new Date().toISOString()
+        });
+        toast.success('Đã thêm tab mới');
+      }
+      setIsAdding(false);
+      setEditingTab(null);
+    } catch (error) {
+      toast.error('Lỗi khi lưu tab');
+    }
+  };
+
+  const handleDeleteTab = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'passwordTabs', id));
+      toast.success('Đã xóa tab');
+    } catch (error) {
+      toast.error('Lỗi khi xóa tab');
+    }
+  };
+
+  return (
+    <div className="glass p-8 rounded-2xl space-y-8 mt-6">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <div className="w-12 h-12 bg-purple-500/10 rounded-xl flex items-center justify-center">
+            <Lock className="w-6 h-6 text-purple-500" />
+          </div>
+          <div>
+            <h3 className="text-xl font-bold">Quản lý Tab Mật khẩu Riêng</h3>
+            <p className="text-sm text-neutral-400">Thêm, sửa, xóa các tab mật khẩu được bảo vệ</p>
+          </div>
+        </div>
+        <button 
+          onClick={() => {
+            setEditingTab(null);
+            setIsAdding(true);
+          }}
+          className="btn-primary py-2 px-4 text-sm flex items-center gap-2"
+        >
+          <Plus className="w-4 h-4" /> Thêm Tab
+        </button>
+      </div>
+
+      {(isAdding || editingTab) && (
+        <form onSubmit={handleSaveTab} className="bg-neutral-900/50 p-6 rounded-xl border border-neutral-800 space-y-4">
+          <h4 className="font-bold text-white mb-4">{editingTab ? 'Chỉnh sửa Tab' : 'Thêm Tab Mới'}</h4>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-neutral-500 mb-1.5 uppercase tracking-wider">Tên Tab</label>
+              <input 
+                name="name"
+                type="text" 
+                defaultValue={editingTab?.name || ''}
+                required
+                placeholder="VD: Mật khẩu Ngân hàng"
+                className="w-full input-field py-2.5 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-neutral-500 mb-1.5 uppercase tracking-wider">Mật khẩu bảo vệ</label>
+              <input 
+                name="password"
+                type="password" 
+                placeholder={editingTab ? "Để trống nếu không muốn đổi" : "Nhập mật khẩu"}
+                required={!editingTab}
+                className="w-full input-field py-2.5 text-sm"
+              />
+            </div>
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <button 
+              type="button"
+              onClick={() => {
+                setIsAdding(false);
+                setEditingTab(null);
+              }}
+              className="px-4 py-2 text-sm text-neutral-400 hover:text-white"
+            >
+              Hủy
+            </button>
+            <button type="submit" className="px-4 py-2 text-sm bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium">
+              Lưu Tab
+            </button>
+          </div>
+        </form>
+      )}
+
+      <div className="space-y-3">
+        {passwordTabs.map(tab => (
+          <div key={tab.id} className="flex items-center justify-between p-4 bg-neutral-900/30 border border-neutral-800 rounded-xl">
+            <div className="flex items-center gap-3">
+              <Lock className="w-4 h-4 text-neutral-500" />
+              <span className="font-medium">{tab.name}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button 
+                onClick={() => setEditingTab(tab)}
+                className="p-2 text-neutral-500 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-colors"
+              >
+                <Settings className="w-4 h-4" />
+              </button>
+              <button 
+                onClick={() => handleDeleteTab(tab.id)}
+                className="p-2 text-neutral-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        ))}
+        {passwordTabs.length === 0 && !isAdding && (
+          <div className="text-center py-8 text-neutral-500 text-sm">
+            Chưa có tab mật khẩu riêng nào.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function AdminContactInfo({ settings }: { settings: SystemSettings | null }) {
   if (!settings?.contactMethods || settings.contactMethods.length === 0) {
@@ -1625,14 +2087,40 @@ function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode, labe
   );
 }
 
-const PasswordRow: React.FC<{ entry: PasswordEntry, onCopy: () => void, onDelete: () => void, onEdit: () => void, isAdmin: boolean }> = ({ entry, onCopy, onDelete, onEdit, isAdmin }) => {
+const PasswordRow: React.FC<{ 
+  entry: PasswordEntry, 
+  onCopy: () => void, 
+  onView: () => void, 
+  onDelete: () => void, 
+  onEdit: () => void, 
+  onTogglePin: () => void,
+  onRestore?: () => void,
+  onHardDelete?: () => void,
+  isAdmin: boolean,
+  isTrashView?: boolean
+}> = ({ entry, onCopy, onView, onDelete, onEdit, onTogglePin, onRestore, onHardDelete, isAdmin, isTrashView }) => {
   const [showPass, setShowPass] = useState(false);
   const favicon = `https://www.google.com/s2/favicons?domain=${entry.website}&sz=64`;
 
+  const handleShowPassStart = () => {
+    onView();
+    setShowPass(true);
+  };
+
+  const handleShowPassEnd = () => {
+    setShowPass(false);
+  };
+
   return (
-    <tr className="text-sm hover:bg-neutral-900/30 transition-colors group">
+    <tr className={`text-sm hover:bg-neutral-900/30 transition-colors group ${entry.isPinned ? 'bg-blue-900/10' : ''}`}>
       <td className="px-6 py-4 min-w-[200px]">
         <div className="flex items-center gap-3">
+          <button 
+            onClick={onTogglePin}
+            className={`p-1.5 rounded-lg transition-all ${entry.isPinned ? 'text-yellow-500 hover:bg-yellow-500/10' : 'text-neutral-600 hover:text-yellow-500 hover:bg-yellow-500/10 opacity-0 group-hover:opacity-100'}`}
+          >
+            <Star className="w-4 h-4" fill={entry.isPinned ? "currentColor" : "none"} />
+          </button>
           <img 
             src={favicon} 
             className="w-8 h-8 rounded-lg bg-neutral-800 p-1.5" 
@@ -1664,10 +2152,18 @@ const PasswordRow: React.FC<{ entry: PasswordEntry, onCopy: () => void, onDelete
       </td>
       <td className="px-6 py-4 min-w-[150px]">
         <div className="flex items-center gap-2 font-mono">
-          <span className="text-neutral-400">
+          <span className="text-neutral-400 select-none">
             {showPass ? decrypt(entry.password) : '••••••••'}
           </span>
-          <button onClick={() => setShowPass(!showPass)} className="p-1 text-neutral-600 hover:text-white">
+          <button 
+            onMouseDown={handleShowPassStart}
+            onMouseUp={handleShowPassEnd}
+            onMouseLeave={handleShowPassEnd}
+            onTouchStart={handleShowPassStart}
+            onTouchEnd={handleShowPassEnd}
+            className="p-1 text-neutral-600 hover:text-white active:text-blue-400 cursor-pointer"
+            title="Chạm và giữ để xem"
+          >
             {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
           </button>
         </div>
@@ -1679,27 +2175,52 @@ const PasswordRow: React.FC<{ entry: PasswordEntry, onCopy: () => void, onDelete
       </td>
       <td className="px-6 py-4 text-right min-w-[150px]">
         <div className="flex items-center justify-end gap-2">
-          <button 
-            onClick={onCopy}
-            className="flex items-center gap-2 bg-neutral-800 hover:bg-blue-600 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
-          >
-            <Copy className="w-3.5 h-3.5" />
-            Sao chép
-          </button>
-          {isAdmin && (
+          {!isTrashView ? (
             <>
               <button 
-                onClick={onEdit}
-                className="p-2 text-neutral-600 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all"
+                onClick={onCopy}
+                className="flex items-center gap-2 bg-neutral-800 hover:bg-blue-600 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
               >
-                <Settings className="w-4 h-4" />
+                <Copy className="w-3.5 h-3.5" />
+                Sao chép
               </button>
-              <button 
-                onClick={onDelete}
-                className="p-2 text-neutral-600 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
+              {isAdmin && (
+                <>
+                  <button 
+                    onClick={onEdit}
+                    className="p-2 text-neutral-600 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all"
+                  >
+                    <Settings className="w-4 h-4" />
+                  </button>
+                  <button 
+                    onClick={onDelete}
+                    className="p-2 text-neutral-600 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              {isAdmin && (
+                <>
+                  <button 
+                    onClick={onRestore}
+                    className="flex items-center gap-2 bg-neutral-800 hover:bg-green-600 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+                  >
+                    <ArchiveRestore className="w-3.5 h-3.5" />
+                    Khôi phục
+                  </button>
+                  <button 
+                    onClick={onHardDelete}
+                    className="p-2 text-neutral-600 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
+                    title="Xóa vĩnh viễn"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </>
+              )}
             </>
           )}
         </div>

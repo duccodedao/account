@@ -33,6 +33,8 @@ export interface UserProfile {
   status?: 'active' | 'locked';
   shareLocation?: boolean;
   logActivity?: boolean;
+  phoneNumber?: string;
+  failedAttempts?: number;
 }
 
 export interface PasswordEntry {
@@ -80,6 +82,7 @@ export interface SystemSettings {
   passwordLevel2: string;
   specialPassword?: string;
   specialPasswordHint?: string;
+  generalPassword?: string;
   isMaintenance: boolean;
   blockedIps?: string[];
   contactMethods?: ContactMethod[];
@@ -91,4 +94,30 @@ export interface UserTab {
   ownerId: string;
   password: string; // Encrypted
   createdAt: string;
+}
+
+export interface SupportRequest {
+  id?: string;
+  uid: string;
+  displayName: string;
+  email: string;
+  photoURL: string;
+  issues: string[];
+  otherDetail?: string;
+  status: 'pending' | 'resolved' | 'rejected' | 'auto_resolved';
+  createdAt: string;
+  updatedAt: string;
+  adminMessage?: string;
+  location?: { latitude: number, longitude: number } | null;
+  isAutoResolved?: boolean;
+}
+
+export interface AppNotification {
+  id?: string;
+  title: string;
+  message: string;
+  type: 'info' | 'warning' | 'success' | 'urgent';
+  createdAt: string;
+  createdBy: string;
+  targetRole?: 'admin' | 'user' | 'all';
 }
